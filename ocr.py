@@ -24,7 +24,6 @@ except Exception:
 
 plt = None
 FigureCanvasTkAgg = None
-NavigationToolbar2Tk = None
 LassoSelector = None
 MplPath = None
 font_manager = None
@@ -80,20 +79,18 @@ def configure_styles_force():
 
 def ensure_matplotlib_loaded():
     """延迟加载 matplotlib，避免拖慢软件首次打开。"""
-    global plt, FigureCanvasTkAgg, NavigationToolbar2Tk, LassoSelector, MplPath, font_manager, _matplotlib_loaded
+    global plt, FigureCanvasTkAgg, LassoSelector, MplPath, font_manager, _matplotlib_loaded
     if _matplotlib_loaded:
         return
 
     import matplotlib.pyplot as _plt
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg
-    from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk as _NavigationToolbar2Tk
     from matplotlib.widgets import LassoSelector as _LassoSelector
     from matplotlib.path import Path as _MplPath
     from matplotlib import font_manager as _font_manager
 
     plt = _plt
     FigureCanvasTkAgg = _FigureCanvasTkAgg
-    NavigationToolbar2Tk = _NavigationToolbar2Tk
     LassoSelector = _LassoSelector
     MplPath = _MplPath
     font_manager = _font_manager
@@ -2295,8 +2292,8 @@ class OCRApp:
                            bg='white', fg='#374151',
                            font=('Microsoft YaHei', 8),
                            activebackground='white',
-                           wraplength=180, justify='left').pack(
-                               anchor='w', padx=12, pady=4)
+                           wraplength=160, justify='left').pack(
+                               fill=tk.X, anchor='w', padx=12, pady=4)
         tk.Frame(draw_card, bg=BG, height=4).pack()
 
         # ── 书籍信息 ──
@@ -2697,7 +2694,7 @@ class OCRApp:
             images, item_label='图片数量', item_action='选择', preview_type='merge'
         )(on_choice)
 
-    def _build_gallery_page(self):
+    def _build_gallery_page(self, page_index=None):
         """构建图片预览页——拼接历史 + 已识别图片统一网格展示"""
         page = self._page_gallery
         for c in page.winfo_children():
@@ -2718,24 +2715,58 @@ class OCRApp:
                   font=('Microsoft YaHei', 9), padx=10, pady=4,
                   cursor='hand2').pack(side=tk.RIGHT)
 
-        # 收集所有卡片数据
+        # 收集所有卡片数据：未识别/待处理优先，已识别内容按最近时间倒序。
         # 格式: {'type': 'merge'|'ocr', ...}
-        cards = []
+        pending_cards = []
+        recognized_cards = []
+        seen_paths = set()
 
-        # 1. 拼接历史（置顶）
+        def _remember_path(path):
+            if path:
+                seen_paths.add(os.path.normcase(os.path.abspath(path)))
+
+        def _has_seen_path(path):
+            return bool(path) and os.path.normcase(os.path.abspath(path)) in seen_paths
+
+        pending_merge_paths = {
+            os.path.normcase(os.path.abspath(entry.get('output_path', '')))
+            for entry in getattr(self, '_merge_history', [])
+            if entry.get('output_path') and not entry.get('recognized')
+        }
+
+        # 1. 当前已选择但还没有识别结果的图片，作为待处理项排在最前。
+        recognized_current_paths = {
+            os.path.normcase(os.path.abspath(r.get('path', '')))
+            for r in (getattr(self, 'all_results', []) or [])
+            if r.get('path') and r.get('count', 0) > 0
+        }
+        for p in getattr(self, 'image_paths', []) or []:
+            if p and os.path.exists(p):
+                key = os.path.normcase(os.path.abspath(p))
+                if (key not in recognized_current_paths and
+                        key not in pending_merge_paths and
+                        key not in seen_paths):
+                    pending_cards.append({'type': 'ocr', 'path': p, 'pending': True})
+                    seen_paths.add(key)
+
+        # 2. 拼接/截图/裁剪历史按状态分组：未识别在前，已识别进入历史区。
         for entry in getattr(self, '_merge_history', []):
             output_path = entry.get('output_path', '')
             if output_path and not os.path.exists(output_path):
                 continue
-            cards.append({'type': 'merge', 'entry': entry})
+            card = {'type': 'merge', 'entry': entry}
+            if entry.get('recognized'):
+                recognized_cards.append((entry.get('recognized_at') or entry.get('time', ''), card))
+            else:
+                pending_cards.append(card)
+            _remember_path(output_path)
 
-        # 2. 已识别图片（按最近识别时间显示，可在设置里限制数量）
+        # 3. 已识别图片（按最近识别时间显示，可在设置里限制数量）
         try:
             ocr_limit = int(getattr(self, 'gallery_ocr_limit', 30))
         except (ValueError, TypeError):
             ocr_limit = 30
 
-        seen = set()
         ocr_candidates = []
         for r in (getattr(self, 'all_results', []) or []):
             p = r.get('path', '')
@@ -2748,21 +2779,62 @@ class OCRApp:
 
         ocr_count = 0
         for _, p in sorted(ocr_candidates, key=lambda item: item[0], reverse=True):
-            if p in seen:
+            if _has_seen_path(p):
                 continue
-            seen.add(p)
-            cards.append({'type': 'ocr', 'path': p})
+            _remember_path(p)
+            recognized_cards.append((_, {'type': 'ocr', 'path': p}))
             ocr_count += 1
             if ocr_limit > 0 and ocr_count >= ocr_limit:
                 break
 
+        cards = pending_cards + [
+            card for _, card in sorted(recognized_cards, key=lambda item: item[0], reverse=True)
+        ]
+
         if not cards:
+            self._gallery_page_index = 0
             empty = tk.Frame(page, bg='white')
             empty.pack(fill=tk.BOTH, expand=True)
             tk.Label(empty, text='暂无图片\n\n请先执行 OCR 识别或拼接/截图/裁剪',
                      bg='white', fg='#9CA3AF',
                      font=('Microsoft YaHei', 12)).pack(expand=True)
             return
+
+        page_size = 18
+        total_pages = max(1, (len(cards) + page_size - 1) // page_size)
+        if page_index is None:
+            page_index = getattr(self, '_gallery_page_index', 0)
+        page_index = max(0, min(int(page_index), total_pages - 1))
+        self._gallery_page_index = page_index
+        start = page_index * page_size
+        end = start + page_size
+        page_cards = cards[start:end]
+
+        pager = tk.Frame(page, bg='white')
+        pager.pack(fill=tk.X, padx=24, pady=(0, 8))
+
+        def _goto_gallery_page(delta):
+            self._build_gallery_page(self._gallery_page_index + delta)
+
+        tk.Label(
+            pager,
+            text=f'共 {len(cards)} 张 | 第 {page_index + 1}/{total_pages} 页 | 每页 18 张',
+            bg='white', fg='#6B7280', font=('Microsoft YaHei', 9)
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            pager, text='下一页', command=lambda: _goto_gallery_page(1),
+            state=tk.NORMAL if page_index < total_pages - 1 else tk.DISABLED,
+            bg='#EFF6FF', fg='#1A6FD4', relief='flat',
+            font=('Microsoft YaHei', 9), padx=12, pady=4,
+            cursor='hand2' if page_index < total_pages - 1 else 'arrow'
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            pager, text='上一页', command=lambda: _goto_gallery_page(-1),
+            state=tk.NORMAL if page_index > 0 else tk.DISABLED,
+            bg='#F3F4F6', fg='#374151', relief='flat',
+            font=('Microsoft YaHei', 9), padx=12, pady=4,
+            cursor='hand2' if page_index > 0 else 'arrow'
+        ).pack(side=tk.RIGHT, padx=(6, 0))
 
         # 滚动容器
         canvas = tk.Canvas(page, bg='white', highlightthickness=0)
@@ -2846,6 +2918,9 @@ class OCRApp:
                 pass
 
             bg_col, badge_text = TAG_COLORS.get(badge_key, ('#6B7280', ''))
+            if card.get('pending'):
+                badge_text = '待识别'
+                bg_col = '#F59E0B'
             if card['type'] == 'merge' and card['entry'].get('recognized'):
                 badge_text = f'{badge_text} 已识别'
                 bg_col = '#16A34A'
@@ -2914,7 +2989,7 @@ class OCRApp:
             iw = inner.winfo_width()
             _state['cols'] = max(1, (iw - 4) // (CARD_W + GAP))
 
-            for card in cards:
+            for card in page_cards:
                 col = _state['col']
                 if col % _state['cols'] == 0:
                     rf = tk.Frame(inner, bg='white')
@@ -3050,8 +3125,8 @@ class OCRApp:
                            variable=self.enable_lasso_mode, value=val,
                            command=self.update_plot_view,
                            bg=PANEL_BG, font=('Microsoft YaHei', 9),
-                           wraplength=190, justify='left').pack(
-                               anchor='w', padx=16, pady=4)
+                           wraplength=170, justify='left').pack(
+                               fill=tk.X, anchor='w', padx=16, pady=4)
 
         # ③ 文本报告页无面板（_panel_report 为空占位）
         self._panel_report = tk.Frame(self._ocr_left, bg=PANEL_BG)
@@ -3367,10 +3442,6 @@ class OCRApp:
         self.fig, self.ax = plt.subplots(figsize=(6, 6), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_plt)
         self.canvas.mpl_connect('button_press_event', self.on_plot_click)
-
-        # 添加 matplotlib 工具栏
-        toolbar = NavigationToolbar2Tk(self.canvas, self.tab_plt)
-        toolbar.update()
 
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.plot_initialized = True
@@ -8729,16 +8800,40 @@ class OCRApp:
 
     def _reopen_merge_entry(self, entry):
         """根据一条历史记录重新打开拼接预览"""
-        source_type = entry['type']
-        data = entry['data']
+        source_type = entry.get('type', 'file')
+        data = entry.get('data', [])
         output_path = entry.get('output_path', '')
         try:
             if (not data) and output_path and os.path.exists(output_path):
-                self.image_paths = [output_path]
-                self.all_results = []
-                self.file_label.config(text=f"已选择: {os.path.basename(output_path)}", fg='blue')
-                self.progress_label.config(text='✓ 已导入保存的拼接图片，请点击「▶ 开始识别」', fg='#16A34A')
-                self._nav_to('OCR识别')
+                images = [Image.open(output_path)]
+                if source_type == 'crop':
+                    item_label, item_action, preview_type = '区域数量', '框选', 'crop'
+                    display_prefix, progress_prefix, save_prefix = '裁剪拼接图片', '裁剪拼接图片', '裁剪拼接'
+                elif source_type == 'screenshot':
+                    item_label, item_action, preview_type = '截图数量', '截取', 'screenshot'
+                    display_prefix, progress_prefix, save_prefix = '截图拼接', '截图拼接图片', '截图拼接'
+                else:
+                    item_label, item_action, preview_type = '图片数量', '选择', 'merge'
+                    display_prefix, progress_prefix, save_prefix = '拼接图片', '拼接图片', '拼接图片'
+
+                def on_saved_choice(choice, merged_image, total_width, max_height, ocr_mode):
+                    if choice == 'cancel':
+                        return
+                    self._import_merged_image_without_ocr(
+                        merged_image,
+                        display_text=f"{display_prefix} - {total_width}x{max_height}",
+                        progress_text=f"✓ {progress_prefix}已导入，请点击「▶ 开始识别」",
+                        save_prefix=save_prefix,
+                        ocr_mode=ocr_mode,
+                        suffix='.png' if source_type == 'screenshot' else '.jpg',
+                        file_label_fg='#1E5A8A' if source_type == 'screenshot' else 'blue',
+                        gallery_type=source_type,
+                        source_paths=entry.get('source_paths', []),
+                    )
+
+                self._show_merged_image_preview(
+                    images, item_label=item_label, item_action=item_action, preview_type=preview_type
+                )(on_saved_choice)
                 return
 
             if source_type == 'screenshot':
