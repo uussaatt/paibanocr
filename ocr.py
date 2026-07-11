@@ -15,6 +15,7 @@ import re
 import random
 import copy
 import hashlib
+import shutil
 
 # 强制 stdout 使用 UTF-8 编码，解决 Windows GBK 控制台下 Unicode 字符崩溃问题
 try:
@@ -444,6 +445,7 @@ class OCRApp:
             self.gallery_ocr_limit = 30
         # 导出文件保存路径
         self.export_save_path = self.store.get('export_save_path', '')
+        self.export_history_dir = Path(__file__).parent / 'export_history_files'
 
         # 预览页默认识别模式（各自独立保存）
         self.preview_ocr_defaults = self.store.get('preview_ocr_defaults',
@@ -1893,10 +1895,57 @@ class OCRApp:
         tk.Label(page, text='修改后点击保存，立即生效', bg='white', fg='#9CA3AF',
                  font=('Microsoft YaHei', 9)).pack(anchor='w', padx=24, pady=(0, 12))
 
+        BORDER = '#DDE3EA'
+        key_entries = []
+        hide_keys_after_id = None
+        reveal_keys_btn = None
+
+        def hide_keys():
+            nonlocal hide_keys_after_id
+            for entry in key_entries:
+                entry.configure(show='*')
+            if reveal_keys_btn:
+                reveal_keys_btn.configure(text='临时显示密钥')
+            if hide_keys_after_id:
+                try:
+                    page.after_cancel(hide_keys_after_id)
+                except Exception:
+                    pass
+                hide_keys_after_id = None
+
+        def reveal_keys():
+            nonlocal hide_keys_after_id
+            if key_entries and key_entries[0].cget('show') == '':
+                hide_keys()
+                return
+
+            pwd = simpledialog.askstring('显示密钥', '请输入管理员密码：', show='*', parent=page)
+            if pwd is None:
+                return
+            if pwd != self.unlock_password:
+                messagebox.showerror('错误', '密码错误')
+                return
+
+            for entry in key_entries:
+                entry.configure(show='')
+            if reveal_keys_btn:
+                reveal_keys_btn.configure(text='立即隐藏密钥')
+            if hide_keys_after_id:
+                try:
+                    page.after_cancel(hide_keys_after_id)
+                except Exception:
+                    pass
+            hide_keys_after_id = page.after(15000, hide_keys)
+
+        reveal_keys_btn = tk.Button(page, text='临时显示密钥', command=reveal_keys,
+                                    bg='white', fg='#374151', relief='flat',
+                                    highlightthickness=1, highlightbackground=BORDER,
+                                    font=('Microsoft YaHei', 9),
+                                    padx=12, pady=5, cursor='hand2')
+        reveal_keys_btn.pack(anchor='w', padx=24, pady=(0, 8))
+
         form = tk.Frame(page, bg='white')
         form.pack(fill=tk.X, padx=24)
-
-        BORDER = '#DDE3EA'
 
         def field(parent, label, var):
             row = tk.Frame(parent, bg='white')
@@ -1905,8 +1954,9 @@ class OCRApp:
                      font=('Microsoft YaHei', 9), width=22, anchor='w').pack(side=tk.LEFT)
             e = tk.Entry(row, textvariable=var, font=('Microsoft YaHei', 9),
                          relief='flat', highlightthickness=1,
-                         highlightbackground=BORDER, width=40)
+                         highlightbackground=BORDER, width=40, show='*')
             e.pack(side=tk.LEFT, ipady=5, padx=(8, 0))
+            key_entries.append(e)
             return e
 
         v_ak  = tk.StringVar(value=API_KEY)
@@ -2661,6 +2711,22 @@ class OCRApp:
             except Exception as e:
                 messagebox.showerror('保存失败', f'保存图片时出错：{e}')
 
+    def _view_merge_entry(self, entry):
+        """查看拼接记录的成品；尚未生成成品时回到编辑预览。"""
+        output_path = entry.get('output_path', '')
+        if output_path and os.path.exists(output_path):
+            self._preview_full_image(output_path)
+        else:
+            self._reopen_merge_entry(entry)
+
+    def _save_merge_entry(self, entry):
+        """另存拼接记录的成品图片。"""
+        output_path = entry.get('output_path', '')
+        if output_path and os.path.exists(output_path):
+            self._save_image_file(output_path)
+        else:
+            messagebox.showinfo('提示', '请先进入“继续编辑”并生成拼接图片，再保存。')
+
     def _gallery_start_merge(self):
         """从图片预览页发起拼接识别——选择图片后进入拼接预览"""
         file_paths = filedialog.askopenfilenames(
@@ -2697,10 +2763,40 @@ class OCRApp:
     def _build_gallery_page(self, page_index=None):
         """构建图片预览页——拼接历史 + 已识别图片统一网格展示"""
         page = self._page_gallery
+        page.unbind('<Configure>')
+        resize_after_id = getattr(self, '_gallery_resize_after_id', None)
+        if resize_after_id:
+            try:
+                page.after_cancel(resize_after_id)
+            except Exception:
+                pass
+            self._gallery_resize_after_id = None
+
         for c in page.winfo_children():
             c.destroy()
 
         page.configure(bg='white')
+
+        CARD_W = 160
+        # 拼接记录的“继续编辑”独占一行，避免在窄卡片中截断文字。
+        CARD_H = 290
+        GAP = 8
+        THUMB_W = CARD_W - 12
+
+        def _calc_gallery_page_size():
+            page.update_idletasks()
+            area_w = page.winfo_width()
+            area_h = page.winfo_height()
+            if area_w <= 100:
+                area_w = self._content_area.winfo_width() or max(640, self.root.winfo_width() - 180)
+            if area_h <= 100:
+                area_h = self._content_area.winfo_height() or max(480, self.root.winfo_height() - 80)
+
+            usable_w = max(CARD_W, area_w - 48 - 18)
+            usable_h = max(CARD_H, area_h - 118)
+            cols = max(1, int((usable_w + GAP) // (CARD_W + GAP)))
+            rows = max(1, int(usable_h // CARD_H))
+            return cols * rows, cols, rows
 
         header = tk.Frame(page, bg='white')
         header.pack(fill=tk.X, padx=24, pady=(18, 8))
@@ -2800,7 +2896,7 @@ class OCRApp:
                      font=('Microsoft YaHei', 12)).pack(expand=True)
             return
 
-        page_size = 18
+        page_size, page_cols, page_rows = _calc_gallery_page_size()
         total_pages = max(1, (len(cards) + page_size - 1) // page_size)
         if page_index is None:
             page_index = getattr(self, '_gallery_page_index', 0)
@@ -2818,7 +2914,7 @@ class OCRApp:
 
         tk.Label(
             pager,
-            text=f'共 {len(cards)} 张 | 第 {page_index + 1}/{total_pages} 页 | 每页 18 张',
+            text=f'共 {len(cards)} 张 | 第 {page_index + 1}/{total_pages} 页 | 每页 {page_size} 张（{page_cols}×{page_rows}）',
             bg='white', fg='#6B7280', font=('Microsoft YaHei', 9)
         ).pack(side=tk.LEFT)
         tk.Button(
@@ -2860,10 +2956,6 @@ class OCRApp:
         canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
 
         from PIL import ImageTk
-
-        CARD_W = 160
-        GAP = 8
-        THUMB_W = CARD_W - 12
 
         # 角标颜色
         TAG_COLORS = {
@@ -2926,8 +3018,10 @@ class OCRApp:
                 bg_col = '#16A34A'
 
             card_frame = tk.Frame(parent, bg='white', relief='solid',
-                                  bd=1, highlightbackground='#E5E7EB')
+                                  bd=1, highlightbackground='#E5E7EB',
+                                  width=CARD_W, height=CARD_H)
             card_frame.pack(side=tk.LEFT, padx=(0, GAP), pady=4)
+            card_frame.pack_propagate(False)
 
             # 缩略图区域（相对定位角标）
             thumb_frame = tk.Frame(card_frame, bg='#F3F4F6',
@@ -2939,7 +3033,7 @@ class OCRApp:
                 lbl = tk.Label(thumb_frame, image=thumb_img, bg='#F3F4F6', cursor='hand2')
                 lbl.place(relx=0.5, rely=0.5, anchor='center')
                 if card['type'] == 'merge':
-                    lbl.bind('<Button-1>', lambda e, en=card['entry']: self._reopen_merge_entry(en))
+                    lbl.bind('<Button-1>', lambda e, en=card['entry']: self._view_merge_entry(en))
                 else:
                     lbl.bind('<Button-1>', lambda e, p=card['path']: self._preview_full_image(p))
 
@@ -2956,25 +3050,33 @@ class OCRApp:
 
             # 按钮行
             btn_r = tk.Frame(card_frame, bg='white')
-            btn_r.pack(fill=tk.X, padx=4, pady=(0, 5))
+            # 固定在卡片底部，文件名换行时也不挤压按钮。
+            btn_r.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 5))
             if card['type'] == 'merge':
-                tk.Button(btn_r, text='↩ 重新打开',
-                          command=lambda en=card['entry']: self._reopen_merge_entry(en),
+                action_row = tk.Frame(btn_r, bg='white')
+                action_row.pack(fill=tk.X)
+                tk.Button(action_row, text='查看',
+                          command=lambda en=card['entry']: self._view_merge_entry(en),
                           bg='#EFF6FF', fg='#1A6FD4', relief='flat',
-                          font=('Microsoft YaHei', 7), padx=6, pady=2,
-                          cursor='hand2').pack(fill=tk.X)
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
+                tk.Button(action_row, text='保存',
+                          command=lambda en=card['entry']: self._save_merge_entry(en),
+                          bg='#F0FDF4', fg='#16A34A', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
+                tk.Button(btn_r, text='继续编辑',
+                          command=lambda en=card['entry']: self._reopen_merge_entry(en),
+                          bg='#FFF7ED', fg='#C2410C', relief='flat',
+                          font=('Microsoft YaHei', 7), padx=4, pady=2,
+                          cursor='hand2').pack(fill=tk.X, pady=(2, 0))
             else:
-                tk.Button(btn_r, text='🔍 查看',
+                tk.Button(btn_r, text='查看',
                           command=lambda p=card['path']: self._preview_full_image(p),
                           bg='#EFF6FF', fg='#1A6FD4', relief='flat',
                           font=('Microsoft YaHei', 7), padx=4, pady=2,
                           cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
-                tk.Button(btn_r, text='📌',
-                          command=lambda p=card['path']: self._popout_image_window(p),
-                          bg='#EFF6FF', fg='#1A6FD4', relief='flat',
-                          font=('Microsoft YaHei', 7), padx=4, pady=2,
-                          cursor='hand2').pack(side=tk.LEFT, padx=(0, 2))
-                tk.Button(btn_r, text='💾',
+                tk.Button(btn_r, text='保存',
                           command=lambda p=card['path']: self._save_image_file(p),
                           bg='#F0FDF4', fg='#16A34A', relief='flat',
                           font=('Microsoft YaHei', 7), padx=4, pady=2,
@@ -3008,8 +3110,23 @@ class OCRApp:
 
         def _on_resize(e):
             if e.widget == page and e.width > 50:
-                _delayed_layout()
-        page.bind('<Configure>', _on_resize, add='+')
+                old_size = getattr(self, '_gallery_page_size', None)
+                new_size, _, _ = _calc_gallery_page_size()
+                if old_size != new_size:
+                    pending_id = getattr(self, '_gallery_resize_after_id', None)
+                    if pending_id:
+                        try:
+                            page.after_cancel(pending_id)
+                        except Exception:
+                            pass
+                    new_page_index = max(0, (self._gallery_page_index * max(1, old_size or 1)) // max(1, new_size))
+                    self._gallery_resize_after_id = page.after(
+                        180, lambda idx=new_page_index: self._build_gallery_page(idx)
+                    )
+                else:
+                    _delayed_layout()
+        self._gallery_page_size = page_size
+        page.bind('<Configure>', _on_resize)
 
     def _clear_gallery_preview(self):
         """Clear gallery preview records without deleting image files or OCR text cache."""
@@ -7211,12 +7328,26 @@ class OCRApp:
             
             # 获取历史记录限制数量（默认500）
             max_records = self.store.get('export_history_limit', 500)
+
+            backup_path = ''
+            backup_name = ''
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ('.xlsx', '.xls', '.xlsm', '.txt') and os.path.exists(file_path):
+                self.export_history_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                stem = Path(file_path).stem
+                backup_name = f"{timestamp}_{stem}{ext}"
+                backup_file = self.export_history_dir / backup_name
+                shutil.copy2(file_path, backup_file)
+                backup_path = str(backup_file)
             
             # 创建新的导出记录
             export_record = {
                 'timestamp': datetime.now().isoformat(),
                 'file_path': file_path,
                 'file_name': os.path.basename(file_path),
+                'backup_path': backup_path,
+                'backup_name': backup_name,
                 'content': content,
                 'line_count': len([l for l in content.splitlines() if l.strip()]),
                 'char_count': len(content),
@@ -7561,15 +7692,19 @@ class OCRApp:
             # 创建密码输入对话框
             password_dialog = tk.Toplevel(parent_window or self.root)
             password_dialog.title(title)
-            password_dialog.geometry("400x250")
+            # 打包导出等操作的说明可能有多行；保留足够的底部空间给确认/取消按钮。
+            dialog_width, dialog_height = 420, 330
+            password_dialog.geometry(f"{dialog_width}x{dialog_height}")
+            password_dialog.minsize(dialog_width, dialog_height)
+            password_dialog.resizable(False, False)
             password_dialog.transient(parent_window or self.root)
             password_dialog.grab_set()
             
             # 居中显示
             password_dialog.update_idletasks()
-            x = (password_dialog.winfo_screenwidth() // 2) - (400 // 2)
-            y = (password_dialog.winfo_screenheight() // 2) - (250 // 2)
-            password_dialog.geometry(f"400x250+{x}+{y}")
+            x = (password_dialog.winfo_screenwidth() // 2) - (dialog_width // 2)
+            y = (password_dialog.winfo_screenheight() // 2) - (dialog_height // 2)
+            password_dialog.geometry(f"{dialog_width}x{dialog_height}+{x}+{y}")
             
             # 结果变量
             result = {'verified': False}
@@ -7579,8 +7714,8 @@ class OCRApp:
                     font=("Microsoft YaHei", 14, "bold"), fg="#333").pack(pady=(20, 15))
             
             # 消息
-            tk.Label(password_dialog, text=message, 
-                    font=("Microsoft YaHei", 11)).pack(pady=10)
+            tk.Label(password_dialog, text=message, wraplength=370,
+                    justify=tk.CENTER, font=("Microsoft YaHei", 11)).pack(pady=10)
             
             # 密码输入框
             password_frame = tk.Frame(password_dialog)
@@ -7603,7 +7738,7 @@ class OCRApp:
             def verify_password():
                 """验证密码"""
                 entered_password = password_var.get()
-                if entered_password == "000":
+                if entered_password == self.unlock_password:
                     result['verified'] = True
                     password_dialog.destroy()
                 else:
@@ -7615,6 +7750,8 @@ class OCRApp:
                 """取消"""
                 result['verified'] = False
                 password_dialog.destroy()
+
+            password_dialog.protocol("WM_DELETE_WINDOW", cancel)
             
             tk.Button(btn_frame, text="确定", command=verify_password,
                      bg="#4CAF50", fg="white", font=("Microsoft YaHei", 10, "bold"),
@@ -7638,45 +7775,118 @@ class OCRApp:
             return False
     
     def export_all_history(self):
-        """一键导出所有历史记录（需要密码验证）"""
+        """一键打包导出历史里的 Excel/TXT 文件（需要密码验证）"""
         try:
             # 密码验证
-            if not self.verify_admin_password(title="导出所有历史记录", 
-                                            message="此操作将导出所有历史记录到一个文件\n请输入管理员密码："):
+            if not self.verify_admin_password(title="打包导出历史文件",
+                                            message="此操作将打包导出历史记录中的 Excel 和 TXT 文件\n请输入管理员密码："):
                 return
             
             export_history = self.store.get('export_history', [])
             if not export_history:
                 messagebox.showinfo("提示", "没有历史记录可以导出")
                 return
+
+            export_exts = {'.xlsx', '.xls', '.xlsm', '.txt'}
+            export_records = []
+            missing_records = []
+            for record in export_history:
+                file_path = record.get('file_path', '')
+                backup_path = record.get('backup_path', '')
+                ext = os.path.splitext(file_path or backup_path)[1].lower()
+                if ext not in export_exts:
+                    continue
+                if backup_path and os.path.exists(backup_path):
+                    record = record.copy()
+                    record['_archive_source_path'] = backup_path
+                    record['_archive_source_label'] = '内部副本'
+                    export_records.append(record)
+                elif file_path and os.path.exists(file_path):
+                    record = record.copy()
+                    record['_archive_source_path'] = file_path
+                    record['_archive_source_label'] = '原始路径'
+                    export_records.append(record)
+                else:
+                    missing_records.append(record)
+
+            if not export_records:
+                messagebox.showinfo(
+                    "提示",
+                    "导出历史中没有找到仍然存在的 Excel 或 TXT 文件。\n\n"
+                    "说明：旧记录可能没有内部副本，原文件被移动或删除后无法打包。"
+                )
+                return
             
             # 选择保存位置
             from datetime import datetime
-            default_filename = f"导出历史记录_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            import zipfile
+            default_filename = f"导出文件历史_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
             
             path = filedialog.asksaveasfilename(
-                defaultextension=".txt",
-                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
-                title="导出所有历史记录",
-                initialvalue=default_filename
+                defaultextension=".zip",
+                filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+                title="打包导出历史文件",
+                initialfile=default_filename
             )
             
             if not path:
                 return
             
-            # 生成导出内容
-            export_content = self.generate_all_history_content(export_history)
-            
-            # 写入文件
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(export_content)
+            used_names = set()
+
+            def unique_archive_name(file_name):
+                base_name = os.path.basename(file_name) or '导出文件'
+                stem, ext = os.path.splitext(base_name)
+                candidate = base_name
+                index = 2
+                while candidate.lower() in used_names:
+                    candidate = f"{stem}_{index}{ext}"
+                    index += 1
+                used_names.add(candidate.lower())
+                return candidate
+
+            manifest_lines = [
+                "OCR 导出历史文件打包清单",
+                f"打包时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"成功打包：{len(export_records)} 个",
+                f"文件缺失：{len(missing_records)} 个",
+                "",
+                "成功打包的文件："
+            ]
+
+            with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                for i, record in enumerate(export_records, 1):
+                    file_path = record.get('file_path', '')
+                    source_path = record.get('_archive_source_path') or file_path
+                    source_label = record.get('_archive_source_label', '原始路径')
+                    archive_name = unique_archive_name(record.get('file_name') or source_path)
+                    zf.write(source_path, archive_name)
+                    timestamp = record.get('timestamp', '')
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+                    manifest_lines.append(
+                        f"{i}. {archive_name} | {timestamp} | 来源：{source_label} | 原路径：{file_path}"
+                    )
+
+                if missing_records:
+                    manifest_lines.extend(["", "未打包的缺失文件："])
+                    for i, record in enumerate(missing_records, 1):
+                        manifest_lines.append(
+                            f"{i}. {record.get('file_name', '')} | 原路径：{record.get('file_path', '')} | 内部副本：{record.get('backup_path', '')}"
+                        )
+
+                zf.writestr("导出清单.txt", "\n".join(manifest_lines))
             
             # 显示成功消息
-            file_size = len(export_content.encode('utf-8'))
-            self.show_toast(f"✅ 历史记录导出成功\n📁 {os.path.basename(path)}\n共 {len(export_history)} 条记录")
+            msg = f"✅ 导出历史文件打包成功\n📁 {os.path.basename(path)}\n共 {len(export_records)} 个文件"
+            if missing_records:
+                msg += f"\n跳过 {len(missing_records)} 个缺失文件"
+            self.show_toast(msg)
             
         except Exception as e:
-            messagebox.showerror("导出失败", f"导出所有历史记录时出错：{str(e)}")
+            messagebox.showerror("导出失败", f"打包导出历史文件时出错：{str(e)}")
     
     def generate_all_history_content(self, export_history):
         """生成所有历史记录的导出内容"""
@@ -7829,7 +8039,7 @@ class OCRApp:
                      bg="#4CAF50", fg="white", font=("Microsoft YaHei", 9)).pack(fill=tk.X, pady=2)
             tk.Button(btn_frame, text="删除记录", command=delete_record, 
                      bg="#f44336", fg="white", font=("Microsoft YaHei", 9)).pack(fill=tk.X, pady=2)
-            tk.Button(btn_frame, text="一键导出", command=self.export_all_history, 
+            tk.Button(btn_frame, text="打包文件", command=self.export_all_history,
                      bg="#2196F3", fg="white", font=("Microsoft YaHei", 9)).pack(fill=tk.X, pady=2)
             tk.Button(btn_frame, text="数量设置", command=self.show_export_limit_settings, 
                      bg="#FF9800", fg="white", font=("Microsoft YaHei", 9)).pack(fill=tk.X, pady=2)
@@ -7856,6 +8066,8 @@ class OCRApp:
                     info = f"导出时间：{timestamp}\n"
                     info += f"文件名：{record['file_name']}\n"
                     info += f"文件路径：{record['file_path']}\n"
+                    if record.get('backup_path'):
+                        info += f"内部副本：{record['backup_path']}\n"
                     info += f"行数：{record['line_count']} 行\n"
                     info += f"字符数：{record['char_count']} 个\n"
                     info += f"文件大小：{record['size_bytes']} 字节\n\n"
@@ -7926,7 +8138,7 @@ class OCRApp:
                         defaultextension=".txt",
                         filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
                         title="另存为",
-                        initialvalue=record['file_name']
+                        initialfile=record['file_name']
                     )
                     
                     if path:
