@@ -2258,13 +2258,19 @@ class OCRApp:
         self._step_nav_blue = blue
 
         def _on_click(event):
-            width = max(canvas.winfo_width(), 1)
-            total_w = width
-            seg_w = total_w / len(steps)
-            if event.x > total_w:
-                return
-            index = min(len(steps) - 1, max(0, int(event.x / seg_w)))
-            self._step_switch(steps[index][0], index)
+            # 点击区域与 _draw_step_nav 保持一致：靠左固定布局
+            r_c = 16
+            text_gap = 10
+            text_block_w = 90
+            step_block_w = r_c * 2 + text_gap + text_block_w
+            arrow_w = 36
+            start_x = 24
+            for idx in range(len(steps)):
+                block_left = start_x + idx * (step_block_w + arrow_w)
+                block_right = block_left + step_block_w
+                if block_left <= event.x <= block_right:
+                    self._step_switch(steps[idx][0], idx)
+                    return
 
         canvas.bind('<Button-1>', _on_click)
         canvas.bind('<Configure>', lambda _e: self._draw_step_nav())
@@ -2276,7 +2282,6 @@ class OCRApp:
         if not canvas or not steps:
             return
 
-        blue = getattr(self, '_step_nav_blue', '#FACC15')
         active_name = getattr(self, '_current_step', steps[0][0])
         active_index = next(
             (i for i, (name, _sub) in enumerate(steps) if name == active_name),
@@ -2285,60 +2290,102 @@ class OCRApp:
         w = max(canvas.winfo_width(), 1)
         h = max(canvas.winfo_height(), 66)
         count = len(steps)
-        total_w = w
-        seg_w = total_w / count
-        y0, y1 = 6, h - 6
         mid_y = h / 2
-        arrow = 20
+        r = 16  # circle radius
 
         canvas.delete('all')
-        for i, (name, sub) in enumerate(steps):
-            x0 = i * seg_w
-            x1 = (i + 1) * seg_w
-            is_active = i == active_index
 
+        # 固定每个步骤块宽度，整体居中，不充满
+        r_circle = r
+        text_gap = 10       # 圆圈右侧到文字的间距
+        text_block_w = 90   # 文字区域估算宽度（标题+副标题）
+        step_block_w = r_circle * 2 + text_gap + text_block_w  # 每个步骤占用宽度
+        arrow_w = 36        # 箭头区域宽度
+
+        total_content_w = step_block_w * count + arrow_w * (count - 1)
+        start_x = 24  # 靠左对齐，留少量左边距
+
+        # 每个步骤圆圈的中心 x
+        centers = []
+        for i in range(count):
+            cx = start_x + i * (step_block_w + arrow_w) + r_circle
+            centers.append(cx)
+
+        for i, (name, sub) in enumerate(steps):
+            cx = centers[i]
+            is_active = i == active_index
+            is_done = i < active_index
+
+            # 箭头形卡片背景（仅 active 步骤）
+            pad = 6  # 卡片内边距，让圆圈不贴边
+            bx0 = start_x + i * (step_block_w + arrow_w) - pad
+            bx1 = bx0 + step_block_w + pad * 2
+            y0, y1 = 4, h - 4
+            arrow_tip = arrow_w // 2 - 2
             if is_active:
                 if i == count - 1:
-                    points = [x0 + 2, y0, x1 - 4, y0, x1 - 4, y1, x0 + 2, y1]
+                    points = [bx0 + 2, y0, bx1 - 4, y0, bx1 - 4, y1, bx0 + 2, y1]
                 else:
                     points = [
-                        x0 + 2, y0, x1 - arrow, y0,
-                        x1 - 2, mid_y, x1 - arrow, y1,
-                        x0 + 2, y1
+                        bx0 + 2, y0,
+                        bx1, y0,
+                        bx1 + arrow_tip, mid_y,
+                        bx1, y1,
+                        bx0 + 2, y1,
                     ]
                 canvas.create_polygon(
                     points, fill='#FFF8DB', outline='#FACC15',
                     width=1.4, joinstyle=tk.ROUND
                 )
 
-            num_x = x0 + 28
-            title_x = x0 + 54
-            circle_fill = blue if is_active else '#F1F3F6'
-            circle_text = '#111827' if is_active else '#374151'
-            title_color = '#111827' if is_active else '#374151'
-            sub_color = '#888888'
+            # 圆圈
+            if is_active:
+                circle_fill = '#FACC15'
+                circle_outline = '#FACC15'
+                circle_text_color = '#1F2329'
+                num_font = ('Microsoft YaHei UI', 11, 'bold')
+            elif is_done:
+                circle_fill = '#FEF3C7'
+                circle_outline = '#FACC15'
+                circle_text_color = '#92400E'
+                num_font = ('Microsoft YaHei UI', 11, 'normal')
+            else:
+                circle_fill = '#FFFFFF'
+                circle_outline = '#D1D5DB'
+                circle_text_color = '#9CA3AF'
+                num_font = ('Microsoft YaHei UI', 11, 'normal')
 
             canvas.create_oval(
-                num_x - 13, mid_y - 13, num_x + 13, mid_y + 13,
-                fill=circle_fill, outline=''
+                cx - r_circle, mid_y - r_circle, cx + r_circle, mid_y + r_circle,
+                fill=circle_fill, outline=circle_outline, width=1.5
             )
             canvas.create_text(
-                num_x, mid_y, text=str(i + 1), fill=circle_text,
-                font=('Helvetica', 10, 'bold')
-            )
-            canvas.create_text(
-                title_x, mid_y - 9, text=name, anchor='w',
-                fill=title_color, font=('Microsoft YaHei UI', 10, 'normal')
-            )
-            canvas.create_text(
-                title_x, mid_y + 10, text=sub, anchor='w',
-                fill=sub_color, font=('Microsoft YaHei UI', 7, 'normal')
+                cx, mid_y, text=str(i + 1),
+                fill=circle_text_color, font=num_font
             )
 
-            if i < count - 1 and not is_active:
+            # 步骤名称
+            title_color = '#1F2329' if is_active else '#6B7280'
+            title_font = ('Microsoft YaHei UI', 11, 'bold') if is_active else ('Microsoft YaHei UI', 10, 'normal')
+            sub_color = '#9CA3AF'
+            text_x = cx + r_circle + text_gap
+
+            canvas.create_text(
+                text_x, mid_y - 9, text=name, anchor='w',
+                fill=title_color, font=title_font
+            )
+            canvas.create_text(
+                text_x, mid_y + 10, text=sub, anchor='w',
+                fill=sub_color, font=('Microsoft YaHei UI', 8, 'normal')
+            )
+
+            # 箭头分隔符（在两步之间）
+            if i < count - 1:
+                next_cx = centers[i + 1]
+                arrow_x = (cx + r_circle + text_gap + text_block_w + next_cx - r_circle) / 2
                 canvas.create_text(
-                    x1 - 18, mid_y, text='>', fill='#6B7280',
-                    font=('Microsoft YaHei UI', 14, 'normal')
+                    arrow_x, mid_y, text='›', fill='#D1D5DB',
+                    font=('Microsoft YaHei UI', 18, 'normal')
                 )
 
 
