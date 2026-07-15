@@ -102,6 +102,143 @@ def ensure_matplotlib_loaded():
 _token_cache = {}
 
 
+class RoundedButton(tk.Canvas):
+    """A small Canvas-backed button with Tk Button-compatible state/config APIs."""
+
+    def __init__(self, master, text='', command=None, radius=9, **kwargs):
+        self._button_options = {
+            'text': text,
+            'left_icon': kwargs.pop('left_icon', ''),
+            'right_icon': kwargs.pop('right_icon', ''),
+            'command': command,
+            'state': kwargs.pop('state', tk.NORMAL),
+            'bg': kwargs.pop('bg', '#F8FAFC'),
+            'fg': kwargs.pop('fg', '#111827'),
+            'activebackground': kwargs.pop('activebackground', '#FFF8DB'),
+            'activeforeground': kwargs.pop('activeforeground', '#111827'),
+            'disabledforeground': kwargs.pop('disabledforeground', '#A0A6AF'),
+            'font': kwargs.pop('font', ('Microsoft YaHei UI', 10, 'normal')),
+            'bordercolor': kwargs.pop('bordercolor', ''),
+        }
+        self._radius = radius
+        self._hovered = False
+        self._pressed = False
+        padx = int(kwargs.pop('padx', 10))
+        pady = int(kwargs.pop('pady', 5))
+        char_width = kwargs.pop('width', None)
+        # Compact by default so three actions fit in the narrow parameter card.
+        # Buttons placed with fill/expand still grow to use all available space.
+        requested_width = max(30, int(char_width) * 9 + padx * 2) if char_width else 58
+        requested_height = max(30, 20 + pady * 2)
+
+        # Accepted for drop-in compatibility with tk.Button; Canvas draws these itself.
+        for ignored in ('relief', 'bd', 'borderwidth', 'highlightbackground',
+                        'highlightcolor', 'highlightthickness'):
+            kwargs.pop(ignored, None)
+
+        parent_bg = master.cget('bg') if 'bg' in master.keys() else '#FFFFFF'
+        super().__init__(master, width=requested_width, height=requested_height,
+                         bg=parent_bg, bd=0, highlightthickness=0,
+                         cursor=kwargs.pop('cursor', 'hand2'), **kwargs)
+        self.bind('<Configure>', lambda _event: self._redraw())
+        self.bind('<Enter>', self._on_enter)
+        self.bind('<Leave>', self._on_leave)
+        self.bind('<ButtonPress-1>', self._on_press)
+        self.bind('<ButtonRelease-1>', self._on_release)
+        self._redraw()
+
+    def _is_disabled(self):
+        return str(self._button_options.get('state')) == str(tk.DISABLED)
+
+    def _rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        radius = max(2, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+        points = [
+            x1 + radius, y1, x2 - radius, y1,
+            x2, y1, x2, y1 + radius,
+            x2, y2 - radius, x2, y2,
+            x2 - radius, y2, x1 + radius, y2,
+            x1, y2, x1, y2 - radius,
+            x1, y1 + radius, x1, y1,
+        ]
+        return self.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
+
+    def _redraw(self):
+        self.delete('all')
+        width = max(2, self.winfo_width())
+        height = max(2, self.winfo_height())
+        disabled = self._is_disabled()
+        active = (self._hovered or self._pressed) and not disabled
+        fill = self._button_options['activebackground'] if active else self._button_options['bg']
+        fg = (self._button_options['disabledforeground'] if disabled else
+              self._button_options['activeforeground'] if active else self._button_options['fg'])
+        border = self._button_options.get('bordercolor') or fill
+        self._rounded_rect(1, 1, width - 1, height - 1, self._radius,
+                           fill=fill, outline=border, width=1)
+        self.create_text(width / 2, height / 2, text=self._button_options['text'],
+                         fill=fg, font=self._button_options['font'])
+        if self._button_options.get('left_icon'):
+            self.create_text(18, height / 2, text=self._button_options['left_icon'],
+                             fill=fg, font=self._button_options['font'])
+        if self._button_options.get('right_icon'):
+            self.create_text(width - 18, height / 2, text=self._button_options['right_icon'],
+                             fill=fg, font=self._button_options['font'])
+        super().configure(cursor='arrow' if disabled else 'hand2')
+
+    def _on_enter(self, _event):
+        self._hovered = True
+        self._redraw()
+
+    def _on_leave(self, _event):
+        self._hovered = False
+        self._pressed = False
+        self._redraw()
+
+    def _on_press(self, _event):
+        if not self._is_disabled():
+            self._pressed = True
+            self._redraw()
+
+    def _on_release(self, event):
+        was_pressed = self._pressed
+        self._pressed = False
+        self._redraw()
+        if (was_pressed and not self._is_disabled() and
+                0 <= event.x <= self.winfo_width() and
+                0 <= event.y <= self.winfo_height()):
+            self.invoke()
+
+    def invoke(self):
+        command = self._button_options.get('command')
+        if command and not self._is_disabled():
+            return command()
+        return None
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf:
+            kwargs.update(cnf)
+        own_keys = set(self._button_options)
+        own_values = {key: kwargs.pop(key) for key in list(kwargs) if key in own_keys}
+        self._button_options.update(own_values)
+        # Existing code configures highlightthickness on normal Buttons.
+        kwargs.pop('highlightthickness', None)
+        if kwargs:
+            super().configure(**kwargs)
+        self._redraw()
+
+    config = configure
+
+    def cget(self, key):
+        if key in self._button_options:
+            return self._button_options[key]
+        return super().cget(key)
+
+    def __getitem__(self, key):
+        return self.cget(key)
+
+    def __setitem__(self, key, value):
+        self.configure(**{key: value})
+
+
 def _is_network_error(e):
     """判断异常是否为网络连接问题"""
     err = str(e).lower()
@@ -578,22 +715,22 @@ class OCRApp:
 
     def setup_main_interface(self):
         """设置主界面 — 左侧导航栏 + 顶部标题栏 + 右侧主体"""
-        self.root.configure(bg='#F7F7F5')
+        self.root.configure(bg='#F6F7F9')
 
         # ── 顶部标题栏 ──
-        title_bar = tk.Frame(self.root, bg='white', height=54,
+        title_bar = tk.Frame(self.root, bg='white', height=60,
                              highlightthickness=1, highlightbackground='#EEF0F3')
         title_bar.pack(fill=tk.X, side=tk.TOP)
         title_bar.pack_propagate(False)
 
         # logo + 标题
-        menu_lbl = tk.Label(title_bar, text='☰', bg='white', fg='#4B5563',
-                            font=('Microsoft YaHei UI', 15, 'normal'), cursor='hand2')
-        menu_lbl.pack(side=tk.LEFT, padx=(18, 8), pady=13)
+        menu_lbl = tk.Label(title_bar, text='☰', bg='white', fg='#202124',
+                            font=('Microsoft YaHei UI', 16, 'normal'), cursor='hand2')
+        menu_lbl.pack(side=tk.LEFT, padx=(24, 12), pady=15)
 
         _logo_cv = tk.Canvas(title_bar, width=24, height=24,
                              bg='white', highlightthickness=0, bd=0)
-        _logo_cv.pack(side=tk.LEFT, padx=(0, 8), pady=14)
+        _logo_cv.pack(side=tk.LEFT, padx=(0, 9), pady=17)
 
         def _draw_logo(cv):
             colors = ['#FDE68A', '#FACC15', '#EAB308', '#CA8A04']
@@ -605,24 +742,22 @@ class OCRApp:
 
         _draw_logo(_logo_cv)
 
-        tk.Label(title_bar, text='OCR 数据分类工具', bg='white', fg='#1F2329',
-                 font=('Microsoft YaHei UI', 15, 'bold')).pack(side=tk.LEFT, pady=14)
+        tk.Label(title_bar, text='OCR 数据分类工具', bg='white', fg='#17191C',
+                 font=('Microsoft YaHei UI', 15, 'bold')).pack(side=tk.LEFT, pady=16)
 
         # 右侧按钮区
-        def _title_btn(parent, text, cmd, fg='#374151'):
+        def _title_btn(parent, text, cmd, fg='#30343B'):
             b = tk.Label(parent, text=text, bg='white', fg=fg,
-                         font=('Microsoft YaHei UI', 10, 'normal'), cursor='hand2', padx=10)
-            b.pack(side=tk.RIGHT, pady=15)
+                         font=('Microsoft YaHei UI', 10, 'normal'), cursor='hand2', padx=12)
+            b.pack(side=tk.RIGHT, pady=18)
             b.bind('<Button-1>', lambda e: cmd())
             b.bind('<Enter>', lambda e: b.config(fg='#D69E00'))
             b.bind('<Leave>', lambda e: b.config(fg=fg))
             return b
 
-        _title_btn(title_bar, '⋯', lambda: None)
-        _title_btn(title_bar, '帮助', lambda: messagebox.showinfo('帮助', '使用左侧导航切换功能页面'))
-        _title_btn(title_bar, '?', lambda: messagebox.showinfo('帮助', '使用左侧导航切换功能页面'))
-        _title_btn(title_bar, '设置', self.show_settings_panel)
-        _title_btn(title_bar, '⚙', self.show_settings_panel)
+        _title_btn(title_bar, '•••', lambda: None)
+        _title_btn(title_bar, 'ⓘ  帮助', lambda: messagebox.showinfo('帮助', '使用左侧导航切换功能页面'))
+        _title_btn(title_bar, '⚙  设置', self.show_settings_panel)
 
         # 字号控件保留为隐藏兼容变量，避免旧逻辑引用时报错。
         font_frame = tk.Frame(title_bar, bg='white')
@@ -633,18 +768,18 @@ class OCRApp:
         self.combo_font.bind('<<ComboboxSelected>>', self.on_font_combo_change)
 
         # ── 主体：左侧导航 + 右侧内容 ──
-        body = tk.Frame(self.root, bg='#F7F7F5')
+        body = tk.Frame(self.root, bg='#F6F7F9')
         body.pack(fill=tk.BOTH, expand=True)
 
         # ── 左侧导航栏 ──
-        nav_bg = '#FFFFFF'
-        nav = tk.Frame(body, bg=nav_bg, width=172,
+        nav_bg = '#FCFCFC'
+        nav = tk.Frame(body, bg=nav_bg, width=190,
                        highlightthickness=1, highlightbackground='#EEF0F3')
         nav.pack(side=tk.LEFT, fill=tk.Y)
         nav.pack_propagate(False)
 
         # 右侧内容区
-        self._content_area = tk.Frame(body, bg='#F7F7F5')
+        self._content_area = tk.Frame(body, bg='#F6F7F9')
         self._content_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 各导航页 frame（用 pack/pack_forget 切换）
@@ -674,46 +809,51 @@ class OCRApp:
 
         # ── 导航菜单项 ──
         self._nav_buttons = {}
+        # Segoe MDL2 Assets is bundled with Windows and closely matches the
+        # thin outline icon language used by the reference sidebar.
+        nav_icon_font = ('Segoe MDL2 Assets', 14, 'normal')
         nav_items = [
-            ('⌂',  '首页',    self._nav_home,           '首页'),
-            ('▣',  'OCR 识别', lambda: self._nav_to('OCR识别'), 'OCR 识别'),
-            ('▤',  '图片预览', lambda: self._nav_to('图片预览'), '图片预览'),
-            ('◷',  '历史记录', lambda: self._nav_to('历史'),    '历史记录'),
-            ('⌘', '密钥管理', lambda: self._nav_to('密钥'),    '密钥管理'),
-            ('▥', '统计',    lambda: self._nav_to('统计'),    '统计'),
-            ('⊡',  '限制尺寸', lambda: self._nav_to('解锁'),    '规则尺寸'),
+            ('\ue80f', '首页',     self._nav_home,                    '首页'),
+            ('\ue8a5', 'OCR 识别', lambda: self._nav_to('OCR识别'),  'OCR 识别'),
+            ('\ue91b', '图片预览', lambda: self._nav_to('图片预览'), '图片预览'),
+            ('\ue81c', '历史记录', lambda: self._nav_to('历史'),     '历史记录'),
+            ('\ue8d7', '密钥管理', lambda: self._nav_to('密钥'),     '密钥管理'),
+            ('\ue9d2', '统计',     lambda: self._nav_to('统计'),     '统计'),
+            ('\ue8b3', '限制尺寸', lambda: self._nav_to('解锁'),     '规则尺寸'),
         ]
 
-        tk.Frame(nav, bg=nav_bg, height=18).pack()  # 顶部间距
+        tk.Frame(nav, bg=nav_bg, height=24).pack()  # 顶部间距
 
         for icon, label, cmd, display_label in nav_items:
-            item = tk.Frame(nav, bg=nav_bg, cursor='hand2')
-            item.pack(fill=tk.X, padx=14, pady=5)
+            item = tk.Frame(nav, bg=nav_bg, cursor='hand2', height=58)
+            item.pack(fill=tk.X)
+            item.pack_propagate(False)
 
             # 左侧激活条
-            bar = tk.Frame(item, bg=nav_bg, width=0)
+            bar = tk.Frame(item, bg=nav_bg, width=4)
             bar.pack(side=tk.LEFT, fill=tk.Y)
+            bar.pack_propagate(False)
 
             # 图标左 + 文字右 水平排列
             content = tk.Frame(item, bg=nav_bg)
-            content.pack(fill=tk.X, expand=True, padx=8, pady=11)
+            content.pack(fill=tk.BOTH, expand=True, padx=(22, 8))
 
-            icon_lbl = tk.Label(content, text=icon, bg=nav_bg, fg='#9CA3AF',
-                                font=('Microsoft YaHei UI', 13, 'normal'))
-            icon_lbl.pack(side=tk.LEFT, padx=(0, 11))
-            text_lbl = tk.Label(content, text=display_label, bg=nav_bg, fg='#555555',
-                                font=('Microsoft YaHei UI', 13, 'normal'))
+            icon_lbl = tk.Label(content, text=icon, bg=nav_bg, fg='#666B72',
+                                font=nav_icon_font)
+            icon_lbl.pack(side=tk.LEFT, padx=(0, 13))
+            text_lbl = tk.Label(content, text=display_label, bg=nav_bg, fg='#26292E',
+                                font=('Microsoft YaHei UI', 12, 'normal'))
             text_lbl.pack(side=tk.LEFT)
 
             def _on_enter(e, f=item, c=content, il=icon_lbl, tl=text_lbl, lbl=label):
                 active = getattr(self, '_active_nav', '')
                 if active != lbl:
                     for w in (f, c, il, tl):
-                        w.config(bg='#FFF8DB')
+                        w.config(bg='#FFF9E9')
 
             def _on_leave(e, f=item, c=content, il=icon_lbl, tl=text_lbl, b=bar, lbl=label):
                 active = getattr(self, '_active_nav', '')
-                bg = '#FFF8DB' if active == lbl else nav_bg
+                bg = '#FFF6DE' if active == lbl else nav_bg
                 for w in (f, c, il, tl):
                     w.config(bg=bg)
 
@@ -766,7 +906,7 @@ class OCRApp:
             '解锁':    '限制尺寸',
         }.get(label, label)
         self._active_nav = label
-        nav_bg = '#FFFFFF'
+        nav_bg = '#FCFCFC'
         # 内部页面（拼接预览、截图预览）不在侧边栏中，只需取消所有高亮
         if label not in self._nav_buttons:
             for lbl, (item, icon_lbl, text_lbl, bar) in self._nav_buttons.items():
@@ -774,8 +914,8 @@ class OCRApp:
                 content = children[1] if len(children) > 1 else item
                 for w in (item, content, icon_lbl, text_lbl):
                     w.config(bg=nav_bg)
-                icon_lbl.config(fg='#9CA3AF')
-                text_lbl.config(fg='#999999', font=('Microsoft YaHei UI', 13, 'normal'))
+                icon_lbl.config(fg='#666B72')
+                text_lbl.config(fg='#26292E', font=('Microsoft YaHei UI', 12, 'normal'))
                 bar.config(bg=nav_bg)
             return
         for lbl, (item, icon_lbl, text_lbl, bar) in self._nav_buttons.items():
@@ -784,15 +924,15 @@ class OCRApp:
             content = children[1] if len(children) > 1 else item
             if lbl == label:
                 for w in (item, content, icon_lbl, text_lbl):
-                    w.config(bg='#FFF8DB')
+                    w.config(bg='#FFF6DE')
                 icon_lbl.config(fg='#C99700')
-                text_lbl.config(fg='#111827', font=('Microsoft YaHei UI', 13, 'bold'))
-                bar.config(bg='#FACC15')
+                text_lbl.config(fg='#17191C', font=('Microsoft YaHei UI', 12, 'normal'))
+                bar.config(bg='#FFC400')
             else:
                 for w in (item, content, icon_lbl, text_lbl):
                     w.config(bg=nav_bg)
-                icon_lbl.config(fg='#9CA3AF')
-                text_lbl.config(fg='#555555', font=('Microsoft YaHei UI', 13, 'normal'))
+                icon_lbl.config(fg='#666B72')
+                text_lbl.config(fg='#26292E', font=('Microsoft YaHei UI', 12, 'normal'))
                 bar.config(bg=nav_bg)
 
     def _show_import_dialog(self):
@@ -2182,66 +2322,57 @@ class OCRApp:
 
     def _rounded_card(self, parent, bg='#F5F7FB', card_bg='#FFFFFF',
                       radius=18, padding=2, width=None, height=None):
-        """Create a rounded white card with soft drop-shadow and return its inner frame."""
-        # Outer wrapper provides margin so shadow is not clipped
-        SHADOW_OFF_X = 3   # shadow shifts right
-        SHADOW_OFF_Y = 5   # shadow shifts down
-        SHADOW_PAD   = 8   # extra canvas margin to fit shadow
+        """Create a rounded white card with a restrained, reference-style shadow."""
+        margin = 5  # exposes the rounded edge and a small shadow on the right/bottom
 
         wrapper = tk.Frame(parent, bg=bg)
 
+        # bg must match parent background so canvas corners blend in, not turn black
         canvas = tk.Canvas(wrapper, bg=bg, highlightthickness=0, bd=0,
                            width=width or 1, height=height or 1)
-        canvas.pack(fill=tk.BOTH, expand=True,
-                    padx=(SHADOW_PAD, SHADOW_PAD + SHADOW_OFF_X),
-                    pady=(SHADOW_PAD, SHADOW_PAD + SHADOW_OFF_Y))
+        canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         inner = tk.Frame(canvas, bg=card_bg)
-        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+        win_id = canvas.create_window((margin, margin), window=inner, anchor='nw')
 
-        # Shadow colour layers (outermost → innermost)
-        shadow_colors = ['#E2E8F0', '#D8DFE9', '#CDD4E0', '#C4CBD8', '#BCC3D2']
-
-        def _draw_rrect(tag, x1, y1, x2, y2, r, color):
+        def _draw_rrect(tag, x1, y1, x2, y2, r, fill, outline='', outline_width=0):
             r = max(0, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
-            canvas.create_rectangle(x1 + r, y1, x2 - r, y2,
-                                    fill=color, outline='', tags=tag)
-            canvas.create_rectangle(x1, y1 + r, x2, y2 - r,
-                                    fill=color, outline='', tags=tag)
-            canvas.create_oval(x1,         y1,         x1+r*2,   y1+r*2,   fill=color, outline='', tags=tag)
-            canvas.create_oval(x2-r*2,     y1,         x2,       y1+r*2,   fill=color, outline='', tags=tag)
-            canvas.create_oval(x1,         y2-r*2,     x1+r*2,   y2,       fill=color, outline='', tags=tag)
-            canvas.create_oval(x2-r*2,     y2-r*2,     x2,       y2,       fill=color, outline='', tags=tag)
+            kw = dict(fill=fill, outline=outline, width=outline_width, tags=tag)
+            canvas.create_rectangle(x1 + r, y1, x2 - r, y2, **kw)
+            canvas.create_rectangle(x1, y1 + r, x2, y2 - r, **kw)
+            canvas.create_oval(x1,       y1,       x1+r*2, y1+r*2, **kw)
+            canvas.create_oval(x2-r*2,   y1,       x2,     y1+r*2, **kw)
+            canvas.create_oval(x1,       y2-r*2,   x1+r*2, y2,     **kw)
+            canvas.create_oval(x2-r*2,   y2-r*2,   x2,     y2,     **kw)
 
         def _draw(event=None):
             w = max(canvas.winfo_width(),  width  or 1)
             h = max(canvas.winfo_height(), height or 1)
             r = min(radius, w // 2, h // 2)
-            canvas.delete('shadow')
+            canvas.delete('card_shadow')
             canvas.delete('card_bg')
+            canvas.delete('card_border')
 
-            # Multi-layer blurred shadow (offset right+down, spreading inward)
-            n = len(shadow_colors)
-            for i, color in enumerate(shadow_colors):
-                spread = n - i          # outermost layer is largest
-                x1 = SHADOW_OFF_X - spread
-                y1 = SHADOW_OFF_Y - spread
-                x2 = w + SHADOW_OFF_X + spread - 1
-                y2 = h + SHADOW_OFF_Y + spread - 1
-                _draw_rrect('shadow', x1, y1, x2, y2, r + spread, color)
+            # A single pale layer avoids the heavy/dirty shadow look on Tk canvases.
+            _draw_rrect('card_shadow', 3, 4, w - 1, h - 1, r, '#E9ECEF')
+            # Rounded card face leaves room for the right/bottom shadow.
+            _draw_rrect('card_bg', 0, 0, w - 5, h - 5, r, card_bg)
+            # Subtle border outline drawn with rounded helper (no straight create_rectangle)
+            _draw_rrect('card_border', 0, 0, w - 5, h - 5, r, '', outline='#EAECF0', outline_width=1)
 
-            # Card face — full canvas area
-            _draw_rrect('card_bg', 0, 0, w, h, r, card_bg)
-
-            canvas.tag_lower('shadow')
+            canvas.tag_lower('card_shadow')
             canvas.tag_raise('card_bg')
-            canvas.coords(win_id, 0, 0)
-            canvas.itemconfigure(win_id, width=max(1, w), height=max(1, h))
+            canvas.tag_raise('card_border')
+
+            # Shrink inner frame by margin so canvas rounded corners are visible
+            canvas.coords(win_id, margin, margin)
+            canvas.itemconfigure(win_id,
+                                 width=max(1, w - margin * 2 - 1),
+                                 height=max(1, h - margin * 2 - 1))
 
         canvas.bind('<Configure>', _draw)
         canvas.after_idle(_draw)
 
-        # Expose canvas and wrapper reference on inner for compatibility
         inner._card_canvas = canvas
         inner._wrapper = wrapper
         wrapper._card_canvas = canvas
@@ -2391,7 +2522,7 @@ class OCRApp:
 
     def setup_ocr_tab(self):
         """合并页面 — 左侧操作面板 + 顶部4步骤标签 + 右侧内容区"""
-        BG = '#F7F7F5'
+        BG = '#F6F7F9'
         PANEL_BG = '#FFFFFF'
         BORDER = '#E5E7EB'
         BLUE = '#FACC15'
@@ -2399,27 +2530,27 @@ class OCRApp:
         self.ocr_tab.configure(bg=BG)
 
         page = tk.Frame(self.ocr_tab, bg=BG)
-        page.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
+        page.pack(fill=tk.BOTH, expand=True, padx=20, pady=(14, 18))
 
         # ── 卡片一：流程进度条 ──
         step_bar = self._rounded_card(page, bg=BG, card_bg='#FFFFFF',
-                                      radius=8, padding=2, height=84)
-        step_bar._wrapper.pack(fill=tk.X, pady=(0, 14))
+                                      radius=12, padding=2, height=92)
+        step_bar._wrapper.pack(fill=tk.X, pady=(0, 12))
         step_inner = tk.Frame(step_bar, bg='#FFFFFF')
-        step_inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=8)
+        step_inner.pack(fill=tk.BOTH, expand=True, padx=16, pady=7)
 
         workspace = tk.Frame(page, bg=BG)
         workspace.pack(fill=tk.BOTH, expand=True)
 
         # ── 卡片二：参数配置面板 ──
         self._ocr_left = self._rounded_card(workspace, bg=BG, card_bg='#FFFFFF',
-                                            radius=8, padding=2, width=250)
-        self._ocr_left._wrapper.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 16))
+                                            radius=12, padding=2, width=272)
+        self._ocr_left._wrapper.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
         self._ocr_left.pack_propagate(False)
 
         # ── 卡片三：绘图交互区 ──
         main_right = self._rounded_card(workspace, bg=BG, card_bg='#FFFFFF',
-                                        radius=8, padding=2)
+                                        radius=12, padding=2)
         main_right._wrapper.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._step_btns = {}
@@ -2480,7 +2611,7 @@ class OCRApp:
 
         # ── 滚动容器 ──
         scroll_frame = tk.Frame(left_panel, bg=BG)
-        scroll_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(0, 0), pady=(2, 2))
+        scroll_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(0, 0), pady=(4, 58))
 
         scroll_canvas = tk.Canvas(scroll_frame, bg=BG, highlightthickness=0, bd=0)
         scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.VERTICAL, command=scroll_canvas.yview)
@@ -2510,45 +2641,56 @@ class OCRApp:
         def card(parent, title, show_title=True):
             """创建扁平分组，统一收纳在参数卡片内。"""
             outer = tk.Frame(parent, bg=BG)
-            outer.pack(fill=tk.X, padx=8, pady=(4, 0))
+            outer.pack(fill=tk.X, padx=12, pady=(5, 0))
             if show_title:
                 tk.Label(outer, text=title, bg=BG, fg='#222222',
-                         font=('Microsoft YaHei UI', 10, 'bold')).pack(anchor='w', pady=(0, 4))
+                         font=('Microsoft YaHei UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
             inner = tk.Frame(outer, bg=BG)
             inner.pack(fill=tk.X)
             return inner
 
         # ── 1. 导入图片 ──
         drop_card = card(left_panel, '1. 导入图片')
-        drop_zone = tk.Frame(drop_card, bg='#FDFEFF', cursor='hand2',
-                             highlightthickness=1, highlightbackground='#E6EAF0',
-                             width=168, height=92)
-        drop_zone.pack(anchor='center', padx=6, pady=(2, 4))
+        drop_zone = tk.Canvas(drop_card, bg='#FFFFFF', cursor='hand2',
+                              highlightthickness=0, bd=0,
+                              width=210, height=120)
+        drop_zone.pack(fill=tk.X, padx=4, pady=(2, 5))
         drop_zone.pack_propagate(False)
         self.drop_zone = drop_zone
 
-        tk.Label(drop_zone, text='▧', bg='#FDFEFF', fg='#C7CDD6',
-                 font=('Microsoft YaHei UI', 14, 'normal')).pack(pady=(5, 0))
-        self.file_label = tk.Label(drop_zone, text='拖拽图片到此处\n或',
-                                   bg='#FDFEFF', fg='#4E5969',
-                                   font=('Microsoft YaHei UI', 8, 'normal'), justify='center')
-        self.file_label.pack(pady=(0, 0))
-        self.select_btn = tk.Button(drop_zone, text='选择图片',
-                                    command=self.select_file,
-                                    bg=BLUE, fg='#111827', relief='flat',
-                                    bd=0, activebackground='#EAB308',
-                                    activeforeground='#111827',
-                                    font=('Microsoft YaHei UI', 9, 'normal'),
-                                    width=9, padx=6, pady=2, cursor='hand2')
+        drop_content = tk.Frame(drop_zone, bg='#FFFFFF')
+        drop_window = drop_zone.create_window(105, 58, window=drop_content, anchor='center')
+        drop_zone.create_rectangle(2, 2, 208, 116, outline='#D9DDE3',
+                                   width=1, dash=(6, 4), tags='drop_border')
+
+        def _resize_drop_zone(event):
+            drop_zone.coords(drop_window, event.width / 2, event.height / 2)
+            drop_zone.coords('drop_border', 2, 2, event.width - 3, event.height - 3)
+
+        drop_zone.bind('<Configure>', _resize_drop_zone)
+
+        tk.Label(drop_content, text='▧', bg='#FFFFFF', fg='#B7BDC6',
+                 font=('Microsoft YaHei UI', 18, 'normal')).pack(pady=(1, 1))
+        self.file_label = tk.Label(drop_content, text='拖拽图片到此处\n或',
+                                   bg='#FFFFFF', fg='#4E5969',
+                                   font=('Microsoft YaHei UI', 9, 'normal'), justify='center')
+        self.file_label.pack(pady=(0, 2))
+        self.select_btn = RoundedButton(drop_content, text='选择图片',
+                                        command=self.select_file, radius=7,
+                                        bg=BLUE, fg='#111827',
+                                        activebackground='#EAB308',
+                                        activeforeground='#111827',
+                                        font=('Microsoft YaHei UI', 9, 'normal'),
+                                        width=9, padx=8, pady=3, cursor='hand2')
         self.select_btn.pack()
 
         tk.Label(drop_card, text='支持 JPG / PNG / BMP / TIFF',
                  bg='white', fg='#86909C',
-                 font=('Microsoft YaHei UI', 9, 'normal')).pack(anchor='w', padx=6, pady=(0, 0))
+                 font=('Microsoft YaHei UI', 8, 'normal')).pack(side=tk.LEFT, padx=4, pady=(0, 0))
 
         # 清空按钮
         clear_row = tk.Frame(drop_card, bg='white')
-        clear_row.pack(fill=tk.X, padx=6, pady=(0, 1))
+        clear_row.pack(fill=tk.X, padx=4, pady=(0, 1))
         self.clear_btn = tk.Button(clear_row, text='清空',
                                    command=self.clear_result,
                                    bg='white', fg='#9CA3AF', relief='flat',
@@ -2558,22 +2700,23 @@ class OCRApp:
         self.clear_btn.pack(side=tk.RIGHT)
 
         # 进度 / 状态
-        self.progress_frame = tk.Frame(left_panel, bg=BG)
-        self.progress_frame.pack(fill=tk.X, padx=8, pady=(1, 0))
+        self.progress_frame = tk.Frame(left_panel, bg='#FFF9E8',
+                                       highlightthickness=0)
+        self.progress_frame.pack(fill=tk.X, padx=12, pady=(4, 2), ipady=3)
         self.progress_label = tk.Label(self.progress_frame, text='',
-                                       bg=BG, fg='#F59E0B',
-                                       font=('Microsoft YaHei UI', 9, 'normal'),
-                                       wraplength=220, justify='left')
-        self.progress_label.pack(anchor='w')
+                                       bg='#FFF9E8', fg='#D68A00',
+                                       font=('Microsoft YaHei UI', 8, 'normal'),
+                                       wraplength=230, justify='left')
+        self.progress_label.pack(anchor='w', padx=6, pady=(1, 0))
         self.progress_frame_row = self.progress_frame
         acc_range = f"{self.size_limits['accurate_min_width']}~{self.size_limits['accurate_max_width']}x{self.size_limits['accurate_min_height']}~{self.size_limits['accurate_max_height']}"
         bas_range = f"{self.size_limits['basic_min_width']}~{self.size_limits['basic_max_width']}x{self.size_limits['basic_min_height']}~{self.size_limits['basic_max_height']}"
         gen_range = f"{self.size_limits['general_min_width']}~{self.size_limits['general_max_width']}x{self.size_limits['general_min_height']}~{self.size_limits['general_max_height']}"
         self.size_hint_label = tk.Label(self.progress_frame,
                                         text=f"高精度({acc_range})\n快速({bas_range})\n通用({gen_range})",
-                                        bg=BG, fg='#999999',
-                                        font=('Consolas', 7, 'normal'), justify='left')
-        self.size_hint_label.pack(anchor='w')
+                                        bg='#FFF9E8', fg='#7B8088',
+                                        font=('Microsoft YaHei UI', 7, 'normal'), justify='left')
+        self.size_hint_label.pack(anchor='w', padx=6, pady=(0, 1))
 
         # ── 2. 识别设置 ──
         mode_card = card(left_panel, '2. 识别设置')
@@ -2594,15 +2737,14 @@ class OCRApp:
 
         _mode_btns = {}
         for mode, text in [('accurate', '高精度'), ('basic', '快速'), ('general', '通用')]:
-            b = tk.Button(mode_row, text=text,
-                          bg='#F8FAFC', fg='#374151', relief='flat',
-                          bd=0, activebackground='#FFF8DB',
-                          activeforeground='#111827', highlightthickness=1,
-                          highlightbackground='#EEF0F3',
-                          font=('Microsoft YaHei UI', 10, 'normal'),
-                          padx=10, pady=4, cursor='hand2', state=tk.DISABLED)
-            b.pack(side=tk.LEFT, padx=(0, 5))
-            b.bind('<Button-1>', lambda e, m=mode, btn=b: _select_mode(m, btn))
+            b = RoundedButton(mode_row, text=text, radius=8,
+                              bg='#F8FAFC', fg='#374151',
+                              activebackground='#FFF8DB',
+                              activeforeground='#111827', bordercolor='#EEF0F3',
+                              font=('Microsoft YaHei UI', 10, 'normal'),
+                              padx=10, pady=5, cursor='hand2', state=tk.DISABLED)
+            b.config(command=lambda m=mode, btn=b: _select_mode(m, btn))
+            b.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
             _mode_btns[mode] = b
 
         self.ocr_btn         = _mode_btns['accurate']
@@ -2618,20 +2760,19 @@ class OCRApp:
         for text, cmd in [('拼接', self.merge_images),
                            ('截图', self.start_screenshot_capture),
                            ('裁剪', self.crop_and_merge_direct)]:
-            tk.Button(proc_row, text=text, command=cmd,
-                      bg='#F8FAFC', fg='#111827', relief='flat',
-                      bd=0, activebackground='#FFF8DB',
-                      activeforeground='#111827', highlightthickness=1,
-                      highlightbackground='#EEF0F3',
-                      font=('Microsoft YaHei UI', 10, 'normal'), padx=10, pady=4,
-                      cursor='hand2').pack(side=tk.LEFT, padx=(0, 4))
+            RoundedButton(proc_row, text=text, command=cmd, radius=8,
+                          bg='#F8FAFC', fg='#111827',
+                          activebackground='#FFF8DB',
+                          activeforeground='#111827', bordercolor='#EEF0F3',
+                          font=('Microsoft YaHei UI', 10, 'normal'), padx=8, pady=5,
+                          cursor='hand2').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         self.merge_btn      = proc_row.winfo_children()[0]
         self.screenshot_btn = proc_row.winfo_children()[1]
         self.crop_merge_btn = proc_row.winfo_children()[2]
 
         # ── 4. 绘图模式 ──
         draw_card = card(left_panel, '4. 绘图模式')
-        for text, val in [('🖱  直线模式', False), ('🎯  圈选模式', True)]:
+        for text, val in [('●  直线模式', False), ('○  圈选模式', True)]:
             tk.Radiobutton(draw_card, text=text,
                            variable=self.enable_lasso_mode, value=val,
                            command=self.update_plot_view,
@@ -2699,12 +2840,12 @@ class OCRApp:
             finally:
                 menu.grab_release()
 
-        page_pick_btn = tk.Button(
+        page_pick_btn = RoundedButton(
             book_inner, text='⊕', command=_show_page_picker,
-            bg='#F8FAFC', fg='#4E5969', relief='flat',
-            bd=0, activebackground='#EAF2FF', activeforeground=BLUE,
+            radius=8, bg='#F8FAFC', fg='#4E5969',
+            activebackground='#FFF8DB', activeforeground=BLUE,
             font=('Microsoft YaHei UI', 10, 'normal'), cursor='hand2',
-            highlightthickness=0, padx=6, pady=3
+            width=2, padx=4, pady=3
         )
         page_pick_btn.grid(row=1, column=2, padx=(4, 0), pady=1)
 
@@ -2723,19 +2864,20 @@ class OCRApp:
         self._book_name_var.trace_add('write', _save_book_name)
         self._book_page_var.trace_add('write', _save_book_page)
 
-        # ── 开始识别按钮 ──
-        self.copy_btn = tk.Button(panel_root, text='▶   开始识别',
-                                  command=self._start_ocr_and_parse,
-                                  bg=BLUE, fg='#111827', relief='flat',
-                                  bd=0, activebackground='#EAB308',
-                                  activeforeground='#111827',
-                                  font=('Microsoft YaHei UI', 11, 'normal'),
-                                  padx=14, pady=10, cursor='hand2', state=tk.DISABLED)
-        self.copy_btn.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 10))
-
         # 辅助按钮变量（已移到右上角设置，此处保留引用以兼容旧代码）
         self.add_zeros_btn = tk.Button(left_panel, state=tk.DISABLED)
         self.export_btn    = tk.Button(left_panel, state=tk.DISABLED)
+
+        # ── 开始识别按钮 —— place 固定在面板底部，不干扰滚动区 ──
+        self.copy_btn = RoundedButton(panel_root,
+                                      text='开始识别', left_icon='▶', right_icon='⌄',
+                                      command=self._start_ocr_and_parse, radius=9,
+                                      bg=BLUE, fg='#111827',
+                                      activebackground='#EAB308',
+                                      activeforeground='#111827',
+                                      font=('Microsoft YaHei UI', 11, 'bold'),
+                                      padx=14, pady=10, cursor='hand2', state=tk.DISABLED)
+        self.copy_btn.place(relx=0.05, rely=1.0, relwidth=0.9, anchor='sw', y=-10)
         # 不 pack，仅兼容旧代码中的 state 设置引用
 
         self.text_input = tk.Text(left_panel, height=1, font=('Consolas', 10))
@@ -8544,13 +8686,26 @@ class OCRApp:
             return
 
         if active:
-            bg = "#D6ECFF"
-            relief = tk.SOLID
+            bg = "#FFF8DB"
+            outline = "#FACC15"
         else:
-            bg = "#EAF4FF"
-            relief = tk.GROOVE
+            bg = "#FFFFFF"
+            outline = "#D9DDE3"
 
-        self.drop_zone.config(bg=bg, relief=relief)
+        self.drop_zone.config(bg=bg)
+        try:
+            self.drop_zone.itemconfigure('drop_border', outline=outline, width=2 if active else 1)
+            for item_id in self.drop_zone.find_all():
+                if self.drop_zone.type(item_id) == 'window':
+                    widget_name = self.drop_zone.itemcget(item_id, 'window')
+                    if widget_name:
+                        widget = self.drop_zone.nametowidget(widget_name)
+                        widget.config(bg=bg)
+                        for child in widget.winfo_children():
+                            if isinstance(child, tk.Label):
+                                child.config(bg=bg)
+        except (tk.TclError, KeyError):
+            pass
         self.file_label.config(bg=bg)
 
     def _on_drag_enter(self, event):
