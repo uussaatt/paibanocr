@@ -24,7 +24,7 @@ from typing import Any
 from PIL import Image
 from PySide6.QtCore import (
     Qt, Signal, QSize, QThreadPool, QUrl, QRect, QPoint, QTimer, QItemSelectionModel,
-    QPropertyAnimation, QEvent,
+    QPropertyAnimation, QEvent, QObject,
 )
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QPainter, QPen, QPixmap, QIcon, QImageReader,
@@ -107,11 +107,15 @@ QPushButton#nav:checked {{
 }}
 QPushButton#step {{ background: transparent; border: 0; text-align: left; min-height: 58px; }}
 QPushButton#step:checked {{ background: #FFF8DF; border: 1px solid #F4D66B; }}
-QLineEdit, QSpinBox, QTextEdit, QTableWidget {{
+QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget {{
     background: #FFFFFF; border: 1px solid #E2E5E9; border-radius: 7px;
     selection-background-color: #FFE58A;
 }}
-QLineEdit, QSpinBox {{ min-height: 34px; padding: 0 9px; }}
+QLineEdit, QSpinBox, QDoubleSpinBox {{ min-height: 34px; padding: 0 9px; }}
+/* 数字框仅保留直接输入，彻底移除右侧的上下微调按钮。 */
+QSpinBox, QDoubleSpinBox {{
+    qproperty-buttonSymbols: NoButtons;
+}}
 QTableWidget {{ border-radius: 0; gridline-color: #ECEEF1; }}
 QHeaderView::section {{
     background: #F7F8FA; border: 0; border-bottom: 1px solid #E3E5E8;
@@ -1511,6 +1515,31 @@ class TableFontDelegate(QStyledItemDelegate):
 class DownwardComboBox(QComboBox):
     """Combo box whose popup always starts below the current cell."""
 
+    groupShortcutPressed = Signal(str)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        # +/- should trigger group shortcuts, not scroll through ABCD options.
+        modifiers = event.modifiers()
+        blocked = (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        )
+        if not (modifiers & blocked) and not event.isAutoRepeat():
+            nk = int(event.nativeVirtualKey())
+            ns = int(event.nativeScanCode())
+            key = event.key()
+            text = event.text()
+            if key in {Qt.Key.Key_Plus, Qt.Key.Key_Equal} or text in {"+", "＋", "="} or nk in {0x6B, 0xBB} or ns == 0x4E:
+                self.groupShortcutPressed.emit("D")
+                event.accept()
+                return
+            if key in {Qt.Key.Key_Minus, Qt.Key.Key_Underscore} or text in {"-", "－", "_"} or nk in {0x6D, 0xBD} or ns == 0x4A:
+                self.groupShortcutPressed.emit("C")
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def showPopup(self) -> None:  # noqa: N802
         row_height = max(self.view().sizeHintForRow(0), self.fontMetrics().height() + 10)
         self.view().setMinimumHeight(row_height * self.count() + 2)
@@ -1523,6 +1552,79 @@ class DownwardComboBox(QComboBox):
         popup.move(self.mapToGlobal(QPoint(0, self.height())))
         popup.resize(max(self.width(), popup.width()), popup.height())
         self.view().scrollToTop()
+
+
+class GroupCellButton(QComboBox):
+    """Native combo-style group cell whose arrow is the only popup trigger."""
+
+    groupChanged = Signal(int, str)  # row_index, group
+    rowClicked = Signal(int, object)  # row_index, keyboard modifiers
+
+    def __init__(self, group: str, row_index: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._row = row_index
+        self.setObjectName("groupCell")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.addItems(list("ABCD"))
+        self.setCurrentText(group if group in "ABCD" else "B")
+        self.textActivated.connect(self._on_group_picked)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.rowClicked.emit(self._row, event.modifiers())
+            # Keep the value area passive.  Only the 24 px drop-down section
+            # behaves like a combo-box button.
+            if event.position().x() < self.width() - 24:
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        # Scrolling the table must not accidentally change the group value.
+        event.ignore()
+
+    def showPopup(self) -> None:  # noqa: N802
+        row_height = 24
+        for row in range(self.count()):
+            self.model().setData(
+                self.model().index(row, 0),
+                QSize(self.width(), row_height),
+                Qt.ItemDataRole.SizeHintRole,
+            )
+        actual_row_height = max(row_height, self.view().sizeHintForRow(0))
+        self.view().setFixedHeight(actual_row_height * self.count() + 2)
+        self.view().setMinimumWidth(self.width())
+        self.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        super().showPopup()
+        QTimer.singleShot(0, self._position_popup_below)
+
+    def _position_popup_below(self) -> None:
+        popup = self.view().window()
+        # The popup frame has its own margins.  Fixing its total height to the
+        # raw item height clips rows, so constrain only the width and let the
+        # popup layout include its frame around the four fixed-height items.
+        popup.setMinimumHeight(0)
+        popup.setMaximumHeight(16777215)
+        popup.setFixedWidth(self.width())
+        if popup.layout() is not None:
+            popup.layout().activate()
+        popup.adjustSize()
+        popup.move(self.mapToGlobal(QPoint(0, self.height())))
+        current = self.model().index(self.currentIndex(), 0)
+        self.view().setCurrentIndex(current)
+        selection = self.view().selectionModel()
+        if selection is not None:
+            selection.select(
+                current,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+        self.view().scrollTo(current)
+        self.view().setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def _on_group_picked(self, group: str) -> None:
+        if group in "ABCD":
+            self.groupChanged.emit(self._row, group)
 
 
 class ClassifierTable(QTableWidget):
@@ -1554,13 +1656,15 @@ class ClassifierTable(QTableWidget):
             return None
         key = event.key()
         text_value = event.text()
+        nk = int(event.nativeVirtualKey())
+        ns = int(event.nativeScanCode())
         if key == Qt.Key.Key_Up:
             return "move", -1
         if key == Qt.Key.Key_Down:
             return "move", 1
-        if key in {Qt.Key.Key_Plus, Qt.Key.Key_Equal} or text_value in {"+", "＋", "="}:
+        if key in {Qt.Key.Key_Plus, Qt.Key.Key_Equal} or text_value in {"+", "＋", "="} or nk in {0x6B, 0xBB} or ns == 0x4E:
             return "group", "D"
-        if key in {Qt.Key.Key_Minus, Qt.Key.Key_Underscore} or text_value in {"-", "－", "_"}:
+        if key in {Qt.Key.Key_Minus, Qt.Key.Key_Underscore} or text_value in {"-", "－", "_"} or nk in {0x6D, 0xBD} or ns == 0x4A:
             return "group", "C"
         return None
 
@@ -1607,6 +1711,7 @@ class OCRPage(QWidget):
         self.paths: list[str] = []
         self.results: list[dict[str, Any]] = []
         self.rows: list[dict[str, Any]] = []
+        self._selection_anchor_row: int | None = None
         self.undo_stack: list[dict[str, Any]] = []
         self.redo_stack: list[dict[str, Any]] = []
         self.parsed_snapshot: dict[str, Any] = {}
@@ -1630,8 +1735,9 @@ class OCRPage(QWidget):
             and hasattr(self, "result_stack")
             and self.result_stack.currentIndex() == 1
             and self.isVisible()
+            and self._classifier_table_has_focus()
         ):
-            if self.table.state() != QAbstractItemView.State.EditingState:
+            if not self._classifier_cell_editor_has_focus():
                 action = ClassifierTable._classification_key(event)
                 native_key = int(event.nativeVirtualKey())
                 native_scan = int(event.nativeScanCode())
@@ -1653,6 +1759,30 @@ class OCRPage(QWidget):
                     event.accept()
                     return True
         return super().eventFilter(watched, event)
+
+    def _classifier_table_has_focus(self) -> bool:
+        """Return whether keyboard input currently belongs to the classifier table."""
+        if not hasattr(self, "table"):
+            return False
+        focus = QApplication.focusWidget()
+        return bool(
+            focus is not None
+            and (focus is self.table or self.table.isAncestorOf(focus))
+        )
+
+    def _classifier_cell_editor_has_focus(self) -> bool:
+        """Detect a real in-cell editor instead of trusting the table's transient state."""
+        if (
+            not hasattr(self, "table")
+            or self.table.state() != QAbstractItemView.State.EditingState
+        ):
+            return False
+        focus = QApplication.focusWidget()
+        if focus is None or focus in {self.table, self.table.viewport()}:
+            return False
+        if isinstance(focus, GroupCellButton):
+            return False
+        return self.table.isAncestorOf(focus)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -1828,11 +1958,9 @@ class OCRPage(QWidget):
         layout = QVBoxLayout(page)
         toolbar = QHBoxLayout()
         toolbar.addWidget(section_label("分类结果"))
-        toolbar.addStretch()
         font_config = self.repository.get("font_config", {}) or {}
         advanced = QPushButton("高级分类操作")
         advanced.setMenu(self._build_advanced_menu())
-        toolbar.addWidget(advanced)
         layout.addLayout(toolbar)
         undo = QPushButton("撤销")
         undo.clicked.connect(self.undo)
@@ -1858,11 +1986,8 @@ class OCRPage(QWidget):
         toolbar.addWidget(merge)
         toolbar.addWidget(split_a)
         toolbar.addWidget(cleanup)
-        for group in "ABCD":
-            group_button = QPushButton(group)
-            group_button.setFixedWidth(36)
-            group_button.clicked.connect(lambda _checked=False, value=group: self.set_selected_group(value))
-            toolbar.addWidget(group_button)
+        toolbar.addStretch()
+        toolbar.addWidget(advanced)
         table = ClassifierTable(0, 7)
         self.table_font_delegate = TableFontDelegate(table)
         table.setItemDelegate(self.table_font_delegate)
@@ -1881,6 +2006,7 @@ class OCRPage(QWidget):
         table.horizontalHeader().setFont(header_font)
         table.verticalHeader().setDefaultSectionSize(max(initial_size * 2 + 12, 34))
         table.itemChanged.connect(self._table_changed)
+        table.clicked.connect(self._activate_group_cell_for_record)
         table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1982,7 +2108,7 @@ class OCRPage(QWidget):
         self.top_notice_bar.setStyleSheet(
             f"QFrame {{background:{background};border:1px solid {border};border-radius:8px;}}"
             f"QPushButton {{color:{foreground};background:#FFFFFF;border:1px solid {border};"
-            "border-radius:6px;padding:0 12px;min-height:28px;font-weight:600;}}"
+            "border-radius:6px;padding:0 12px;min-height:28px;font-weight:600;}"
         )
         self.notice_undo_button.setVisible(bool(undo_available))
         self.top_notice_bar.show()
@@ -2378,30 +2504,118 @@ class OCRPage(QWidget):
         self._populate_results(redraw_plot=bool(state.get("_redraw_plot", True)))
 
     @staticmethod
-    def _group_combo_style(font_size: int) -> str:
+    def _group_button_style(font_size: int) -> str:
         return (
-            "QComboBox { background:#F3F4F6; border:1px solid #B8BDC5; "
-            "border-radius:6px; padding:2px 24px 2px 8px; min-height:26px; "
-            f"font-size:{font_size}pt; }}"
-            "QComboBox:hover { border-color:#8F96A3; background:#FFFFFF; }"
-            "QComboBox::drop-down { border:0; width:24px; }"
-            "QComboBox QAbstractItemView { background:#FFFFFF; border:1px solid #AEB4BE; "
-            "selection-background-color:#3399F3; selection-color:#FFFFFF; "
-            f"font-size:{font_size}pt; padding:2px; outline:0; }}"
-            "QComboBox QAbstractItemView::item { min-height:28px; padding:2px 8px; }"
+            "QComboBox#groupCell {"
+            f"  font-size: {font_size}pt;"
+            "  font-weight: bold;"
+            "  background: #FFFFFF;"
+            "  color: #17191C;"
+            "  border: 1px solid #8FA9BC;"
+            "  border-radius: 0;"
+            "  padding: 0 27px 0 7px;"
+            "}"
+            "QComboBox#groupCell::drop-down {"
+            "  subcontrol-origin: padding;"
+            "  subcontrol-position: top right;"
+            "  width: 23px;"
+            "  background: #D8ECFA;"
+            "  border-left: 1px solid #5F9FC8;"
+            "}"
+            "QComboBox#groupCell::drop-down:hover { background: #C7E4F8; }"
+            "QComboBox#groupCell QAbstractItemView {"
+            f"  font-size: {font_size}pt;"
+            "  font-weight: normal;"
+            "  color: #17191C;"
+            "  background: #FFFFFF;"
+            "  border: 1px solid #8A8A8A;"
+            "  outline: 0;"
+            "  padding: 0;"
+            "  selection-background-color: #0078D7;"
+            "  selection-color: #FFFFFF;"
+            "}"
+            "QComboBox#groupCell QAbstractItemView::item {"
+            "  min-height: 24px;"
+            "  padding: 0 0 0 6px;"
+            "}"
         )
 
-    def _create_group_combo(self, row_index: int, group: str) -> QComboBox:
-        combo = DownwardComboBox()
-        combo.addItems(list("ABCD"))
-        combo.setCurrentText(group if group in "ABCD" else "B")
-        combo.setMinimumWidth(72)
+    def _create_group_button(self, row_index: int, group: str) -> GroupCellButton:
+        button = GroupCellButton(group, row_index)
+        button.setMinimumWidth(52)
         font_size = int(self.table.property("classifierFontSize") or 11)
-        combo.setStyleSheet(self._group_combo_style(font_size))
-        combo.currentTextChanged.connect(
-            lambda value, row=row_index: self._group_combo_changed(row, value)
+        button.setFont(QFont("Microsoft YaHei UI", font_size, QFont.Weight.Bold))
+        button.setStyleSheet(self._group_button_style(font_size))
+        button.groupChanged.connect(self._group_combo_changed)
+        button.rowClicked.connect(self._group_cell_clicked)
+        return button
+
+    def _group_cell_clicked(self, row_index: int, modifiers) -> None:
+        """Select a table row without opening the group drop-down."""
+        if not 0 <= row_index < self.table.rowCount():
+            return
+        selection = self.table.selectionModel()
+        if selection is None:
+            return
+        index = self.table.model().index(row_index, 5)
+        if (
+            modifiers & Qt.KeyboardModifier.ShiftModifier
+            and self._selection_anchor_row is not None
+        ):
+            self._select_row_range(self._selection_anchor_row, row_index)
+        else:
+            flags = QItemSelectionModel.SelectionFlag.Rows
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                flags |= QItemSelectionModel.SelectionFlag.Toggle
+                if self._selection_anchor_row is None:
+                    self._selection_anchor_row = row_index
+            else:
+                flags |= QItemSelectionModel.SelectionFlag.ClearAndSelect
+                self._selection_anchor_row = row_index
+            selection.select(index, flags)
+        selection.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.table.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _select_row_range(self, first_row: int, last_row: int) -> None:
+        """Select every complete row between the saved anchor and target."""
+        selection = self.table.selectionModel()
+        if selection is None:
+            return
+        selection.clearSelection()
+        flags = (
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows
         )
-        return combo
+        start, end = sorted((first_row, last_row))
+        for row_index in range(start, end + 1):
+            selection.select(self.table.model().index(row_index, 0), flags)
+
+    def _activate_group_cell_for_record(self, clicked_index) -> None:
+        """Make the selected row's group cell current after a normal cell click."""
+        if not clicked_index.isValid() or clicked_index.column() == 5:
+            return
+        row_index = clicked_index.row()
+        if not 0 <= row_index < self.table.rowCount():
+            return
+        selection = self.table.selectionModel()
+        if selection is None:
+            return
+        modifiers = QApplication.keyboardModifiers()
+        if (
+            modifiers & Qt.KeyboardModifier.ShiftModifier
+            and self._selection_anchor_row is not None
+        ):
+            self._select_row_range(self._selection_anchor_row, row_index)
+        elif not (modifiers & Qt.KeyboardModifier.ControlModifier):
+            self._selection_anchor_row = row_index
+        elif self._selection_anchor_row is None:
+            self._selection_anchor_row = row_index
+        group_index = self.table.model().index(row_index, 5)
+        selection.setCurrentIndex(
+            group_index,
+            QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
+        self.table.setFocus(Qt.FocusReason.MouseFocusReason)
 
     def _group_combo_changed(self, row_index: int, group: str) -> None:
         if not 0 <= row_index < len(self.rows) or group not in "ABCD":
@@ -2466,7 +2680,7 @@ class OCRPage(QWidget):
                 self.table.setItem(row_index, column, item)
             self.table.setCellWidget(
                 row_index, 5,
-                self._create_group_combo(row_index, str(row.get("group", "B"))),
+                self._create_group_button(row_index, str(row.get("group", "B"))),
             )
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
@@ -2584,9 +2798,10 @@ class OCRPage(QWidget):
             self.table.horizontalHeader().setFont(header_font)
             self.table.verticalHeader().setDefaultSectionSize(max(size * 2 + 12, 34))
             for row in range(self.table.rowCount()):
-                combo = self.table.cellWidget(row, 5)
-                if isinstance(combo, QComboBox):
-                    combo.setStyleSheet(self._group_combo_style(size))
+                widget = self.table.cellWidget(row, 5)
+                if isinstance(widget, GroupCellButton):
+                    widget.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+                    widget.setStyleSheet(self._group_button_style(size))
             self.table.viewport().update()
         if hasattr(self, "report"):
             self.report.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
@@ -3158,7 +3373,7 @@ class OCRPage(QWidget):
     def _activate_group_shortcut(self, group: str) -> None:
         if self.result_stack.currentIndex() != 1:
             return
-        if self.table.state() == QAbstractItemView.State.EditingState:
+        if self._classifier_cell_editor_has_focus():
             return
         self.set_selected_group(group)
 
@@ -3233,7 +3448,7 @@ class OCRPage(QWidget):
         for row_index in sorted(affected_rows):
             self.table.setCellWidget(
                 row_index, 5,
-                self._create_group_combo(
+                self._create_group_button(
                     row_index, str(self.rows[row_index].get("group", "B"))
                 ),
             )
@@ -3299,11 +3514,11 @@ class OCRPage(QWidget):
             group_item = self.table.item(index, 5)
             if group_item is not None:
                 group_item.setText(group)
-            group_combo = self.table.cellWidget(index, 5)
-            if isinstance(group_combo, QComboBox):
-                group_combo.blockSignals(True)
-                group_combo.setCurrentText(group)
-                group_combo.blockSignals(False)
+            group_widget = self.table.cellWidget(index, 5)
+            if isinstance(group_widget, GroupCellButton):
+                group_widget.blockSignals(True)
+                group_widget.setCurrentText(group)
+                group_widget.blockSignals(False)
             label_item = self.table.item(index, 0)
             if label_item is not None and not self._font_style_for_label(str(self.rows[index].get("label", ""))):
                 label_item.setForeground(QColor("#006600" if group == "C" else "#17191C"))
@@ -5647,7 +5862,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.repository = Repository()
-        self.setWindowTitle("OCR 数据分类工具")
+        # Keep the native title bar controls, but hide its top-left icon/title.
+        # A truly empty title may fall back to QApplication.applicationName().
+        # Use an invisible character so Windows leaves the caption visually blank.
+        self.setWindowTitle("\u200b")
+        transparent_icon = QPixmap(16, 16)
+        transparent_icon.fill(Qt.GlobalColor.transparent)
+        self.setWindowIcon(QIcon(transparent_icon))
         self.setMinimumSize(1200, 800)
         config = self.repository.get("qt_window_config", {}) or {}
         self.resize(int(config.get("width", 1440)), int(config.get("height", 920)))
@@ -5825,7 +6046,7 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("OCR 数据分类工具")
+    app.setApplicationName("")
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     window = MainWindow()
