@@ -27,7 +27,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QEvent, QObject,
 )
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QPainter, QPen, QPixmap, QIcon, QImageReader,
+    QBrush, QColor, QDesktopServices, QFont, QPainter, QPen, QPixmap, QIcon, QImageReader,
     QKeySequence, QShortcut, QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -760,20 +760,64 @@ class PixmapScrollViewer(QScrollArea):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.source = QPixmap()
+        self.highlight_rect = QRect()
         self.zoom = 1.0
         self.fit = True
+        self._dragging = False
+        self._drag_global_position = QPoint()
         self.label = QLabel("暂无预览")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet("background:#F3F4F6;color:#8A9099;")
+        self.label.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.label.installEventFilter(self)
         self.setWidget(self.label)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("QScrollArea{background:#F3F4F6;border:1px solid #E3E6EA;border-radius:8px;}")
+        self.setToolTip("滚轮缩放；放大后按住鼠标左键拖动画面")
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self.label:
+            if (
+                event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._dragging = True
+                self._drag_global_position = event.globalPosition().toPoint()
+                self.label.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._dragging:
+                current = event.globalPosition().toPoint()
+                delta = current - self._drag_global_position
+                self._drag_global_position = current
+                self.horizontalScrollBar().setValue(
+                    self.horizontalScrollBar().value() - delta.x()
+                )
+                self.verticalScrollBar().setValue(
+                    self.verticalScrollBar().value() - delta.y()
+                )
+                event.accept()
+                return True
+            if (
+                event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._dragging = False
+                self.label.setCursor(Qt.CursorShape.OpenHandCursor)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
         self.source = QPixmap(pixmap)
+        self.highlight_rect = QRect()
         self.fit = True
         self.zoom = 1.0
+        self._render()
+
+    def set_highlight(self, rect: QRect | None) -> None:
+        self.highlight_rect = QRect(rect) if rect is not None else QRect()
         self._render()
 
     def show_actual(self) -> None:
@@ -808,9 +852,32 @@ class PixmapScrollViewer(QScrollArea):
         size = QSize(max(1, round(self.source.width() * scale)), max(1, round(self.source.height() * scale)))
         preview = self.source.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
+        if self.highlight_rect.isValid() and not self.highlight_rect.isNull():
+            sx = preview.width() / self.source.width()
+            sy = preview.height() / self.source.height()
+            highlight = QRect(
+                round(self.highlight_rect.x() * sx),
+                round(self.highlight_rect.y() * sy),
+                max(2, round(self.highlight_rect.width() * sx)),
+                max(2, round(self.highlight_rect.height() * sy)),
+            ).intersected(preview.rect())
+            if highlight.isValid():
+                painter = QPainter(preview)
+                painter.fillRect(highlight, QColor(255, 196, 0, 70))
+                painter.setPen(QPen(QColor("#E53935"), 3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(highlight.adjusted(1, 1, -1, -1))
+                painter.end()
         self.label.setText("")
         self.label.resize(preview.size())
         self.label.setPixmap(preview)
+        if self.highlight_rect.isValid() and not self.fit:
+            center_x = round(self.highlight_rect.center().x() * scale)
+            center_y = round(self.highlight_rect.center().y() * scale)
+            QTimer.singleShot(
+                0,
+                lambda: self.ensureVisible(center_x, center_y, 80, 80),
+            )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1776,6 +1843,7 @@ class OCRPage(QWidget):
         self.paths: list[str] = []
         self.results: list[dict[str, Any]] = []
         self.rows: list[dict[str, Any]] = []
+        self.verification_path = ""
         self._selection_anchor_row: int | None = None
         self.undo_stack: list[dict[str, Any]] = []
         self.redo_stack: list[dict[str, Any]] = []
@@ -1795,6 +1863,15 @@ class OCRPage(QWidget):
         self._refresh_key_states()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            hasattr(self, "verification_viewer")
+            and watched is self.verification_viewer.label
+            and event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._verification_image_double_clicked(event.position().toPoint())
+            event.accept()
+            return True
         if (
             event.type() == QEvent.Type.KeyPress
             and hasattr(self, "result_stack")
@@ -2172,6 +2249,8 @@ class OCRPage(QWidget):
         toolbar = QHBoxLayout()
         toolbar.addWidget(section_label("分类结果"))
         font_config = self.repository.get("font_config", {}) or {}
+        verify = QPushButton("原图核对")
+        verify.clicked.connect(self.open_verification_dialog)
         advanced = QPushButton("高级分类操作")
         advanced.setMenu(self._build_advanced_menu())
         layout.addLayout(toolbar)
@@ -2200,6 +2279,7 @@ class OCRPage(QWidget):
         toolbar.addWidget(split_a)
         toolbar.addWidget(cleanup)
         toolbar.addStretch()
+        toolbar.addWidget(verify)
         toolbar.addWidget(advanced)
         table = ClassifierTable(0, 7)
         self.table_font_delegate = TableFontDelegate(table)
@@ -2229,6 +2309,7 @@ class OCRPage(QWidget):
         table.rowsReordered.connect(self.reorder_rows)
         table.moveRequested.connect(self.move_row)
         table.groupRequested.connect(self.set_selected_group)
+        table.itemSelectionChanged.connect(self._sync_verification_from_table)
         for sequence, handler in [
             ("Insert", self.add_row), ("Delete", self.delete_rows),
             ("Ctrl+Y", self.redo),
@@ -2246,8 +2327,219 @@ class OCRPage(QWidget):
                 lambda value=group: self._activate_group_shortcut(value)
             )
             self.keypad_group_shortcuts.append(shortcut)
-        layout.addWidget(table)
+        layout.addWidget(table, 1)
         return page, table
+
+    def open_verification_dialog(self) -> None:
+        if not hasattr(self, "verification_dialog"):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("原图核对")
+            dialog.resize(920, 680)
+            dialog.setModal(False)
+            self.verification_dialog = dialog
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(8)
+
+            header = QHBoxLayout()
+            self.verification_previous = QPushButton("上一张")
+            self.verification_previous.clicked.connect(
+                lambda: self._shift_verification_image(-1)
+            )
+            self.verification_position = QLabel("暂无原图")
+            self.verification_position.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.verification_next = QPushButton("下一张")
+            self.verification_next.clicked.connect(
+                lambda: self._shift_verification_image(1)
+            )
+            header.addWidget(self.verification_previous)
+            header.addWidget(self.verification_position, 1)
+            header.addWidget(self.verification_next)
+            layout.addLayout(header)
+
+            self.verification_viewer = PixmapScrollViewer()
+            self.verification_viewer.setMinimumSize(600, 420)
+            layout.addWidget(self.verification_viewer, 1)
+
+            tools = QHBoxLayout()
+            self.verification_source_name = muted_label("尚未选择表格内容")
+            self.verification_source_name.setWordWrap(True)
+            tools.addWidget(self.verification_source_name, 1)
+            for text_value, handler in (
+                ("－", lambda: self.verification_viewer.zoom_by(1 / 1.2)),
+                ("＋", lambda: self.verification_viewer.zoom_by(1.2)),
+                ("100%", self.verification_viewer.show_actual),
+                ("适应窗口", self.verification_viewer.show_fit),
+            ):
+                button = QPushButton(text_value)
+                button.clicked.connect(handler)
+                tools.addWidget(button)
+            layout.addLayout(tools)
+
+            self.verification_line = QLabel("当前行：—")
+            self.verification_line.setWordWrap(True)
+            self.verification_line.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.verification_line.setStyleSheet(
+                "background:#FFFFFF;border:1px solid #E5E7EB;border-radius:6px;"
+                "padding:7px;color:#374151;"
+            )
+            layout.addWidget(self.verification_line)
+            footer = QHBoxLayout()
+            footer.addStretch()
+            close = QPushButton("关闭")
+            close.clicked.connect(dialog.close)
+            footer.addWidget(close)
+            layout.addLayout(footer)
+
+        self.verification_dialog.show()
+        self.verification_dialog.raise_()
+        self.verification_dialog.activateWindow()
+        if self.rows and not 0 <= self.table.currentRow() < len(self.rows):
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+        self._sync_verification_from_table()
+        if not self.rows:
+            paths = self._verification_paths()
+            if paths:
+                self._show_verification_path(paths[0])
+
+    def _verification_paths(self) -> list[str]:
+        candidates = [str(result.get("path", "") or "") for result in self.results]
+        candidates.extend(self.paths)
+        paths: list[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if not path or not Path(path).is_file():
+                continue
+            key = os.path.normcase(os.path.abspath(path))
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+        return paths
+
+    def _show_verification_path(self, path: str, row: dict[str, Any] | None = None) -> None:
+        paths = self._verification_paths()
+        if not path or not Path(path).is_file():
+            self.verification_path = ""
+            self.verification_viewer.set_pixmap(QPixmap())
+            self.verification_position.setText("无可用原图")
+            self.verification_source_name.setText("该内容没有关联的本地图片")
+            self.verification_line.setText(
+                f"当前行：{row.get('label', '—')}" if row is not None else "当前行：—"
+            )
+            self.verification_previous.setEnabled(False)
+            self.verification_next.setEnabled(False)
+            return
+        normalized = os.path.normcase(os.path.abspath(path))
+        index = next(
+            (i for i, item in enumerate(paths)
+             if os.path.normcase(os.path.abspath(item)) == normalized),
+            0,
+        )
+        current_normalized = (
+            os.path.normcase(os.path.abspath(self.verification_path))
+            if self.verification_path else ""
+        )
+        if current_normalized != normalized:
+            reader = QImageReader(path)
+            reader.setAutoTransform(True)
+            image = reader.read()
+            pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+            self.verification_viewer.set_pixmap(pixmap)
+            self.verification_path = path if not pixmap.isNull() else ""
+        rect = row.get("_source_rect") if row is not None else None
+        if not isinstance(rect, QRect) and row is not None:
+            rect = self._estimated_text_rect(row)
+        self.verification_viewer.set_highlight(rect if isinstance(rect, QRect) else None)
+        self.verification_position.setText(f"第 {index + 1}/{len(paths)} 张")
+        self.verification_source_name.setText(Path(path).name)
+        self.verification_line.setText(
+            f"当前行：{row.get('label', '—')}" if row is not None else "当前行：—"
+        )
+        enabled = len(paths) > 1
+        self.verification_previous.setEnabled(enabled)
+        self.verification_next.setEnabled(enabled)
+
+    def _sync_verification_from_table(self) -> None:
+        if (
+            not hasattr(self, "verification_dialog")
+            or not self.verification_dialog.isVisible()
+        ):
+            return
+        row_index = self.table.currentRow()
+        if not 0 <= row_index < len(self.rows):
+            return
+        row = self.rows[row_index]
+        self._show_verification_path(str(row.get("_source_path", "") or ""), row)
+
+    def _shift_verification_image(self, delta: int) -> None:
+        paths = self._verification_paths()
+        if not paths:
+            return
+        normalized = (
+            os.path.normcase(os.path.abspath(self.verification_path))
+            if self.verification_path else ""
+        )
+        current = next(
+            (i for i, item in enumerate(paths)
+             if os.path.normcase(os.path.abspath(item)) == normalized),
+            0,
+        )
+        target_path = paths[(current + delta) % len(paths)]
+        target_key = os.path.normcase(os.path.abspath(target_path))
+        row_index = next(
+            (i for i, row in enumerate(self.rows)
+             if row.get("_source_path")
+             and os.path.normcase(os.path.abspath(str(row["_source_path"]))) == target_key),
+            -1,
+        )
+        if row_index >= 0:
+            self.table.selectRow(row_index)
+            self.table.setCurrentCell(row_index, 0)
+            item = self.table.item(row_index, 0)
+            if item is not None:
+                self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        else:
+            self._show_verification_path(target_path)
+
+    def _verification_image_double_clicked(self, display_point: QPoint) -> None:
+        source = self.verification_viewer.source
+        label_pixmap = self.verification_viewer.label.pixmap()
+        if source.isNull() or label_pixmap.isNull() or not self.verification_path:
+            return
+        source_point = QPoint(
+            round(display_point.x() * source.width() / max(1, label_pixmap.width())),
+            round(display_point.y() * source.height() / max(1, label_pixmap.height())),
+        )
+        target_path = os.path.normcase(os.path.abspath(self.verification_path))
+        candidates: list[tuple[int, QRect]] = []
+        for index, row in enumerate(self.rows):
+            path = str(row.get("_source_path", "") or "")
+            if not path or os.path.normcase(os.path.abspath(path)) != target_path:
+                continue
+            rect = row.get("_source_rect")
+            if not isinstance(rect, QRect):
+                rect = self._estimated_text_rect(row, source.width())
+            candidates.append((index, rect))
+        if not candidates:
+            return
+        containing = [item for item in candidates if item[1].contains(source_point)]
+        pool = containing or candidates
+        row_index, _rect = min(
+            pool,
+            key=lambda item: (
+                item[1].center().x() - source_point.x()
+            ) ** 2 + (
+                item[1].center().y() - source_point.y()
+            ) ** 2,
+        )
+        self.table.selectRow(row_index)
+        self.table.setCurrentCell(row_index, 0)
+        item = self.table.item(row_index, 0)
+        if item is not None:
+            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _build_report_page(self) -> tuple[QWidget, QTextEdit]:
         page = QWidget()
@@ -2498,6 +2790,8 @@ class OCRPage(QWidget):
         self.drop_zone.label.setText(
             f"已选择 {len(self.paths)} 张图片\n{Path(self.paths[0]).name}" if self.paths else "拖拽图片到此处\n或点击选择图片"
         )
+        if self.paths and hasattr(self, "verification_viewer"):
+            self._show_verification_path(self.paths[0])
         self._refresh_key_states()
 
     def clear_files(self) -> None:
@@ -2516,6 +2810,12 @@ class OCRPage(QWidget):
         self.plot.draw_rows([])
         self.table.setRowCount(0)
         self.report.clear()
+        self.verification_path = ""
+        if hasattr(self, "verification_viewer"):
+            self.verification_viewer.set_pixmap(QPixmap())
+            self.verification_position.setText("暂无原图")
+            self.verification_source_name.setText("尚未选择表格内容")
+            self.verification_line.setText("当前行：—")
         self._refresh_key_states()
 
     def _update_hint(self) -> None:
@@ -2568,7 +2868,7 @@ class OCRPage(QWidget):
 
     def _ocr_completed(self, results: list) -> None:
         self.results = results
-        self.rows = [parse_line(line) for result in results for line in result.get("lines", [])]
+        self.rows = self._rows_with_sources(results)
         for row in self.rows:
             row["group"] = self._group_for_label(row["label"])
             row["category_key"] = "数据区"
@@ -2588,6 +2888,9 @@ class OCRPage(QWidget):
             mark_merge_recognized(self.repository, str(result.get("path", "")), self.mode)
         self.book_page.setValue(int(self.repository.get("book_page", self.book_page.value())))
         self._populate_results()
+        if self.rows:
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
         self.start_button.setEnabled(True)
         failures = sum(bool(r.get("error") or r.get("skipped")) for r in results)
         self.statusChanged.emit("done", f"识别完成 · {len(self.rows)} 行")
@@ -2595,20 +2898,64 @@ class OCRPage(QWidget):
         if failures:
             QMessageBox.warning(self, "识别完成", f"已识别 {len(self.rows)} 行，{failures} 张图片失败或被跳过。")
 
-    def load_text_for_parsing(self, text: str, source_name: str = "历史记录") -> int:
+    @staticmethod
+    def _estimated_text_rect(row: dict[str, Any], image_width: int = 0) -> QRect:
+        """Use the saved OCR width, falling back to a legacy text estimate."""
+        height = max(2, round(float(row.get("height", 0) or 0)))
+        width = round(float(row.get("width", 0) or 0))
+        if width <= 0:
+            label = str(row.get("label", ""))
+            units = sum(1.0 if ord(char) > 255 else .55 for char in label) or 1.0
+            width = max(height, round(height * (units + .5)))
+        left = max(0, round(float(row.get("x", 0) or 0)))
+        top = max(0, round(float(row.get("y", 0) or 0)))
+        if image_width > 0:
+            width = min(width, max(2, image_width - left))
+        return QRect(left, top, width, height)
+
+    def _rows_with_sources(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for source_index, result in enumerate(results):
+            source_path = str(result.get("path", "") or "")
+            source_file = str(result.get("file", "") or "")
+            boxes = result.get("boxes", []) or []
+            if not isinstance(boxes, (list, tuple)):
+                boxes = []
+            image_width = 0
+            if source_path and Path(source_path).is_file():
+                image_width = QImageReader(source_path).size().width()
+            for source_line, line in enumerate(result.get("lines", []) or []):
+                row = parse_line(line)
+                box = boxes[source_line] if source_line < len(boxes) else None
+                if isinstance(box, dict):
+                    row["x"] = float(box.get("left", row.get("x", 0)) or 0)
+                    row["y"] = float(box.get("top", row.get("y", 0)) or 0)
+                    row["width"] = float(box.get("width", 0) or 0)
+                    row["height"] = float(box.get("height", row.get("height", 0)) or 0)
+                    row["_source_box_exact"] = row["width"] > 0 and row["height"] > 0
+                row["_source_index"] = source_index
+                row["_source_line"] = source_line
+                row["_source_path"] = source_path
+                row["_source_file"] = source_file
+                row["_source_rect"] = self._estimated_text_rect(row, image_width)
+                rows.append(row)
+        return rows
+
+    def load_text_for_parsing(
+        self,
+        text: str,
+        source_name: str = "历史记录",
+        source_results: list[dict[str, Any]] | None = None,
+    ) -> int:
         """Load recognized text into the native plot/table/report workflow."""
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
             return 0
-        self.results = [{
-            "file": source_name,
-            "path": "",
-            "type": "history",
-            "lines": lines,
-            "count": len(lines),
-            "cached": True,
+        self.results = copy.deepcopy(source_results) if source_results else [{
+            "file": source_name, "path": "", "type": "history",
+            "lines": lines, "count": len(lines), "cached": True,
         }]
-        self.rows = [parse_line(line) for line in lines]
+        self.rows = self._rows_with_sources(self.results)
         for row in self.rows:
             row["group"] = self._group_for_label(row["label"])
             row["category_key"] = "数据区"
@@ -2621,12 +2968,15 @@ class OCRPage(QWidget):
         self._apply_classification_rules()
         self.parsed_snapshot = self._capture_classifier_state()
         self._populate_results()
+        if self.rows:
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
         self._switch_step(0)
         self.step_buttons[0].setChecked(True)
         self.statusChanged.emit("done", f"已复制并解析 · {len(self.rows)} 行")
         return len(self.rows)
 
-    def _apply_classification_rules(self) -> None:
+    def _apply_classification_rules(self, reorder: bool = True) -> None:
         """Apply the legacy section ordering and dynamic 1–5 category labels."""
         if not self.rows:
             return
@@ -2700,7 +3050,7 @@ class OCRPage(QWidget):
             for _number, indices in sorted(numbered_sections, key=lambda item: item[0])
             for index in indices
         ]
-        if len(grouped_indices) == len(self.rows):
+        if reorder and len(grouped_indices) == len(self.rows):
             self.rows = [self.rows[index] for index in grouped_indices]
 
     def _capture_classifier_state(self, thresholds: list[float] | None = None,
@@ -2876,8 +3226,10 @@ class OCRPage(QWidget):
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.rows))
         for row_index, row in enumerate(self.rows):
-            values = [row["label"], row["y"], row["x"], row["height"], row["confidence"],
-                      row["group"], row.get("category", "未分类")]
+            values = [
+                row["label"], row["y"], row["x"], row["height"], row["confidence"],
+                row["group"], row.get("category", "未分类"),
+            ]
             category_color = QColor(self.category_colors.get(str(row.get("category", "未分类")), ""))
             background = QColor("#FFF3B0") if row.get("marked", False) else (
                 category_color.lighter(180) if category_color.isValid() else QColor()
@@ -2923,6 +3275,85 @@ class OCRPage(QWidget):
             self.plot.draw_rows(self.rows)
         self._update_report()
 
+    def _sync_table_classifications(self) -> None:
+        """Update category values/styles without recreating table cells or widgets."""
+        if self.table.rowCount() != len(self.rows):
+            self._populate_results(redraw_plot=False)
+            return
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        confidence_threshold = float(self.repository.get("conf_threshold", 0) or 0)
+        for row_index, row in enumerate(self.rows):
+            category = str(row.get("category", "未分类"))
+            category_item = self.table.item(row_index, 6)
+            if category_item is not None:
+                category_item.setText(category)
+                category_item.setToolTip(str(row.get("category_key", "数据区")))
+            category_color = QColor(self.category_colors.get(category, ""))
+            background = QColor("#FFF3B0") if row.get("marked", False) else (
+                category_color.lighter(180) if category_color.isValid() else QColor()
+            )
+            confidence = float(row.get("confidence", 0) or 0)
+            low_confidence = (
+                confidence > 0
+                and confidence_threshold > 0
+                and confidence < confidence_threshold
+            )
+            for column in range(self.table.columnCount()):
+                item = self.table.item(row_index, column)
+                if item is None:
+                    continue
+                if low_confidence:
+                    item.setBackground(QBrush(QColor("#FFF4C2")))
+                elif background.isValid():
+                    item.setBackground(QBrush(background))
+                else:
+                    item.setBackground(QBrush())
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
+
+    def _sort_table_by_category(self) -> None:
+        """Sort existing table rows by numeric category without rebuilding cells."""
+        if self.table.rowCount() != len(self.rows):
+            return
+        rows_by_token: dict[int, dict[str, Any]] = {}
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        for row_index, row in enumerate(self.rows):
+            item = self.table.item(row_index, 6)
+            if item is None:
+                continue
+            token = id(row)
+            rows_by_token[token] = row
+            item.setData(Qt.ItemDataRole.UserRole, token)
+            category = str(row.get("category", ""))
+            try:
+                item.setData(Qt.ItemDataRole.DisplayRole, int(category))
+            except ValueError:
+                item.setData(Qt.ItemDataRole.DisplayRole, category)
+
+        self.table.sortItems(6, Qt.SortOrder.AscendingOrder)
+        sorted_rows: list[dict[str, Any]] = []
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 6)
+            token = int(item.data(Qt.ItemDataRole.UserRole) or 0) if item is not None else 0
+            row = rows_by_token.get(token)
+            if row is not None:
+                sorted_rows.append(row)
+            if item is not None:
+                item.setData(Qt.ItemDataRole.UserRole, None)
+            group_widget = self.table.cellWidget(row_index, 5)
+            if isinstance(group_widget, GroupCellButton):
+                group_widget._row = row_index
+        if len(sorted_rows) == len(self.rows):
+            self.rows = sorted_rows
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
+        self._update_report()
+        self._sync_verification_from_table()
+
     def _font_style_for_label(self, label: str) -> dict[str, Any] | None:
         _marker_count, label = self._split_blank_line_markers(label)
         rules = self.repository.get("font_style_rules", {}) or {}
@@ -2947,6 +3378,13 @@ class OCRPage(QWidget):
             return
         self._snapshot(redraw_plot=False)
         self.rows[index][key] = value
+        if key in {"label", "y", "x", "height"} and self.rows[index].get("_source_path"):
+            source_path = str(self.rows[index]["_source_path"])
+            image_width = QImageReader(source_path).size().width() if Path(source_path).is_file() else 0
+            self.rows[index]["_source_rect"] = self._estimated_text_rect(
+                self.rows[index], image_width
+            )
+            self._sync_verification_from_table()
         self._update_report()
 
     def _update_report(self) -> None:
@@ -3637,6 +4075,9 @@ class OCRPage(QWidget):
         new_row, position = self._row_dialog("新增分类条目", initial, include_position=True)
         if new_row is None:
             return
+        for key in ("_source_index", "_source_line", "_source_path", "_source_file", "_source_rect"):
+            if key in reference:
+                new_row[key] = copy.deepcopy(reference[key])
         self._snapshot(redraw_plot=False)
         if not selected or position == "end":
             insert_at = len(self.rows)
@@ -3777,8 +4218,11 @@ class OCRPage(QWidget):
             return
         self._snapshot(previous)
         self.plot.thresholds = sorted(float(value) for value in thresholds)
-        self._apply_classification_rules()
-        self._populate_results(redraw_plot=False)
+        # A threshold changes only category assignments.  Keep the existing
+        # row/cell widgets intact and update the affected values in place.
+        self._apply_classification_rules(reorder=False)
+        self._sync_table_classifications()
+        self._sort_table_by_category()
         self.plot.sync_row_styles(self.rows, self.category_colors)
         y_values = [float(row.get("y", 0) or 0) for row in self.rows]
         categories = list(dict.fromkeys(str(row.get("category", "5")) for row in self.rows))
@@ -4423,7 +4867,7 @@ class HomePage(QWidget):
 
 
 class HistoryPage(QWidget):
-    parseRequested = Signal(str, str)
+    parseRequested = Signal(str, str, list)
 
     def __init__(self, repository: Repository) -> None:
         super().__init__()
@@ -4520,6 +4964,49 @@ class HistoryPage(QWidget):
                 lines.extend(str(value).strip() for value in content if str(value).strip())
         return "\n".join(lines)
 
+    def _item_source_results(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Reconnect history text to the original images kept by the OCR cache."""
+        cache_records = [
+            value for value in (self.repository.get("ocr_cache", {}) or {}).values()
+            if isinstance(value, dict)
+        ]
+        results: list[dict[str, Any]] = []
+        for file_data in item.get("files", []) or []:
+            content = file_data.get("content", [])
+            if isinstance(content, str):
+                content = content.splitlines()
+            lines = [str(value).strip() for value in content if str(value).strip()]
+            digest = str(file_data.get("image_hash", "") or "")
+            file_name = str(file_data.get("name", "") or "")
+            cached = next(
+                (record for record in cache_records
+                 if digest and str(record.get("hash", "")) == digest),
+                None,
+            )
+            if cached is None:
+                cached = next(
+                    (record for record in cache_records
+                     if file_name and str(record.get("file", "")) == file_name
+                     and Path(str(record.get("path", ""))).is_file()),
+                    None,
+                )
+            path = str((cached or {}).get("path", "") or "")
+            if path and not Path(path).is_file():
+                path = ""
+            results.append({
+                "file": file_name,
+                "path": path,
+                "type": "history",
+                "lines": lines,
+                "boxes": copy.deepcopy(
+                    file_data.get("boxes", []) or (cached or {}).get("boxes", []) or []
+                ),
+                "count": len(lines),
+                "cached": True,
+                "image_hash": digest,
+            })
+        return results
+
     def copy_parse_selected(self) -> None:
         row = self.table.currentRow()
         if not 0 <= row < len(self.items):
@@ -4535,7 +5022,7 @@ class HistoryPage(QWidget):
         page_no = item.get("page_no", "")
         if page_no != "":
             source_name = f"{source_name} · 第 {page_no} 页"
-        self.parseRequested.emit(text, source_name)
+        self.parseRequested.emit(text, source_name, self._item_source_results(item))
 
     def show_detail(self, *_args) -> None:
         row = self.table.currentRow()
@@ -4575,7 +5062,7 @@ class HistoryPage(QWidget):
             source_name = f"{source_name} · 第 {page_no} 页"
         if dialog is not None:
             dialog.accept()
-        self.parseRequested.emit(text, source_name)
+        self.parseRequested.emit(text, source_name, self._item_source_results(item))
 
     def export_selected(self) -> None:
         row = self.table.currentRow()
@@ -6410,8 +6897,10 @@ class MainWindow(QMainWindow):
         )
         self.status_text.setText(text)
 
-    def parse_history_record(self, text: str, source_name: str) -> None:
-        count = self.ocr_page.load_text_for_parsing(text, source_name)
+    def parse_history_record(
+        self, text: str, source_name: str, source_results: list[dict[str, Any]]
+    ) -> None:
+        count = self.ocr_page.load_text_for_parsing(text, source_name, source_results)
         if not count:
             QMessageBox.warning(self, "解析失败", "历史记录中没有可解析的有效内容")
             return
