@@ -57,7 +57,7 @@ YELLOW_DARK = "#D49A00"
 INK = "#17191C"
 MUTED = "#6F747C"
 SURFACE = "#FFFFFF"
-BACKGROUND = "#F5F6F8"
+BACKGROUND = "#F7F8FA"
 BORDER = "#E8EAED"
 
 for _font_path in (Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyh.ttf")):
@@ -71,16 +71,19 @@ rcParams["axes.unicode_minus"] = False
 STYLE = f"""
 * {{
     font-family: "Microsoft YaHei UI";
-    font-size: 13px;
+    font-size: 12px;
     color: {INK};
 }}
 QMainWindow, QWidget#appRoot {{ background: {BACKGROUND}; }}
 QFrame#header {{ background: #FFFFFF; border-bottom: 1px solid {BORDER}; }}
 QFrame#sidebar {{ background: #FCFCFC; border-right: 1px solid {BORDER}; }}
-QFrame#card {{ background: #FFFFFF; border: 1px solid #ECEEF1; border-radius: 12px; }}
-QLabel#appTitle {{ font-size: 19px; font-weight: 700; }}
-QLabel#sectionTitle {{ font-size: 15px; font-weight: 700; }}
-QLabel#muted {{ color: {MUTED}; font-size: 12px; }}
+QFrame#card {{ background: #FFFFFF; border: 1px solid #EEF0F2; border-radius: 8px; }}
+QFrame#card[panelRole="parameters"] {{
+    background: #FFFFFF; border: 1px solid #E7E9EC; border-radius: 12px;
+}}
+QLabel#appTitle {{ font-size: 15px; font-weight: 700; }}
+QLabel#sectionTitle {{ font-size: 12px; font-weight: 700; }}
+QLabel#muted {{ color: {MUTED}; font-size: 10px; }}
 QPushButton {{
     min-height: 34px; padding: 0 14px; background: #F6F7F9;
     border: 1px solid #ECEEF1; border-radius: 8px;
@@ -97,16 +100,14 @@ QPushButton#recognitionMode:checked:hover {{
     background: #F2B900; border-color: #F2B900;
 }}
 QPushButton#nav {{
-    text-align: left; min-height: 56px; padding-left: 22px; border: 0;
-    border-radius: 0; background: transparent; font-size: 15px;
+    text-align: left; min-height: 52px; max-height: 52px; padding-left: 16px; border: 0;
+    border-radius: 0; background: transparent; font-size: 13px;
 }}
 QPushButton#nav:hover {{ background: #FFF9E9; }}
 QPushButton#nav:checked {{
-    background: #FFF6DE; color: #B88400; border-left: 4px solid {YELLOW};
-    padding-left: 18px;
+    background: #FFF7E3; color: #30343A; border-left: 3px solid {YELLOW};
+    padding-left: 13px;
 }}
-QPushButton#step {{ background: transparent; border: 0; text-align: left; min-height: 58px; }}
-QPushButton#step:checked {{ background: #FFF8DF; border: 1px solid #F4D66B; }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget {{
     background: #FFFFFF; border: 1px solid #E2E5E9; border-radius: 7px;
     selection-background-color: #FFE58A;
@@ -122,13 +123,16 @@ QHeaderView::section {{
     padding: 8px; font-weight: 600;
 }}
 QScrollArea {{ border: 0; background: transparent; }}
+QScrollArea#paramsScroll,
+QScrollArea#paramsScroll > QWidget > QWidget,
+QWidget#paramsContent {{ background: transparent; }}
 """
 
 
-def add_shadow(widget: QWidget, blur: int = 24, opacity: int = 24) -> None:
+def add_shadow(widget: QWidget, blur: int = 14, opacity: int = 14) -> None:
     effect = QGraphicsDropShadowEffect(widget)
     effect.setBlurRadius(blur)
-    effect.setOffset(0, 5)
+    effect.setOffset(0, 2)
     effect.setColor(QColor(20, 25, 35, opacity))
     widget.setGraphicsEffect(effect)
 
@@ -138,6 +142,76 @@ def card(parent: QWidget | None = None) -> QFrame:
     frame.setObjectName("card")
     add_shadow(frame)
     return frame
+
+
+def sidebar_icon(kind: str) -> QIcon:
+    """Create a state-aware vector icon without relying on icon fonts."""
+    icon = QIcon()
+    normal_color = "#B2B6BC" if kind == "menu" else "#747980"
+    states = (
+        (normal_color, QIcon.Mode.Normal, QIcon.State.Off),
+        ("#4F545B", QIcon.Mode.Active, QIcon.State.Off),
+        ("#25282C", QIcon.Mode.Normal, QIcon.State.On),
+        ("#25282C", QIcon.Mode.Active, QIcon.State.On),
+        ("#B2B6BC", QIcon.Mode.Disabled, QIcon.State.Off),
+    )
+    for color, mode, state in states:
+        pixmap = QPixmap(28, 28)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if kind == "menu":
+            painter.drawLine(7, 9, 21, 9)
+            painter.drawLine(7, 14, 21, 14)
+            painter.drawLine(7, 19, 21, 19)
+        elif kind == "home":
+            painter.drawLine(5, 13, 14, 5)
+            painter.drawLine(14, 5, 23, 13)
+            painter.drawRoundedRect(QRect(7, 12, 14, 11), 1.5, 1.5)
+            painter.drawRect(QRect(12, 17, 4, 6))
+        elif kind == "ocr":
+            painter.drawRoundedRect(QRect(6, 5, 16, 18), 2, 2)
+            painter.drawRect(QRect(10, 9, 8, 10))
+            painter.drawLine(8, 7, 11, 7)
+        elif kind == "image":
+            painter.drawRoundedRect(QRect(5, 6, 18, 16), 2, 2)
+            painter.drawEllipse(QRect(16, 9, 3, 3))
+            painter.drawLine(7, 19, 12, 14)
+            painter.drawLine(12, 14, 16, 18)
+            painter.drawLine(16, 18, 19, 15)
+            painter.drawLine(19, 15, 22, 19)
+        elif kind == "history":
+            painter.drawEllipse(QRect(6, 6, 16, 16))
+            painter.drawLine(14, 9, 14, 15)
+            painter.drawLine(14, 15, 18, 17)
+            painter.drawLine(8, 5, 10, 3)
+            painter.drawLine(18, 3, 20, 5)
+        elif kind == "key":
+            painter.drawEllipse(QRect(5, 5, 9, 9))
+            painter.drawLine(12, 12, 22, 22)
+            painter.drawLine(18, 18, 21, 15)
+            painter.drawLine(20, 20, 23, 17)
+        elif kind == "stats":
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(QRect(5, 14, 4, 9), 1, 1)
+            painter.drawRoundedRect(QRect(12, 9, 4, 14), 1, 1)
+            painter.drawRoundedRect(QRect(19, 5, 4, 18), 1, 1)
+        elif kind == "rules":
+            painter.drawRoundedRect(QRect(6, 5, 16, 18), 2, 2)
+            painter.drawLine(10, 9, 14, 9)
+            painter.drawLine(10, 13, 17, 13)
+            painter.drawLine(10, 17, 14, 17)
+            painter.drawLine(18, 16, 18, 20)
+            painter.drawLine(16, 18, 20, 18)
+        painter.end()
+        icon.addPixmap(pixmap, mode, state)
+    return icon
 
 
 def section_label(text: str) -> QLabel:
@@ -151,6 +225,82 @@ def muted_label(text: str, wrap: bool = False) -> QLabel:
     label.setObjectName("muted")
     label.setWordWrap(wrap)
     return label
+
+
+class StepButton(QPushButton):
+    """Compact workflow step with an independently styled badge and labels."""
+
+    def __init__(self, number: int, title: str, subtitle: str) -> None:
+        super().__init__()
+        self._x_scale = 1.0
+        self._y_scale = 1.0
+        self._ui_scale = 1.0
+        self.setObjectName("step")
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.content_layout = QHBoxLayout(self)
+
+        self.badge = QLabel(str(number))
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.content_layout.addWidget(self.badge)
+
+        labels = QVBoxLayout()
+        labels.setContentsMargins(0, 0, 0, 0)
+        labels.setSpacing(1)
+        self.title_label = QLabel(title)
+        self.subtitle_label = QLabel(subtitle)
+        labels.addWidget(self.title_label)
+        labels.addWidget(self.subtitle_label)
+        self.content_layout.addLayout(labels, 1)
+
+        for label in (self.badge, self.title_label, self.subtitle_label):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        self.toggled.connect(self._sync_style)
+        self.apply_scale(1.0, 1.0, 1.0)
+
+    def apply_scale(self, x_scale: float, y_scale: float, ui_scale: float) -> None:
+        self._x_scale = x_scale
+        self._y_scale = y_scale
+        self._ui_scale = ui_scale
+        badge_size = max(26, round(30 * ui_scale))
+        self.setFixedHeight(max(50, round(56 * y_scale)))
+        self.content_layout.setContentsMargins(
+            round(10 * x_scale), round(4 * y_scale),
+            round(10 * x_scale), round(4 * y_scale),
+        )
+        self.content_layout.setSpacing(max(8, round(10 * ui_scale)))
+        self.badge.setFixedSize(badge_size, badge_size)
+        self.title_label.setStyleSheet(
+            "background:transparent;border:0;"
+            f"font-size:{max(12, round(13 * ui_scale))}px;"
+            "font-weight:600;color:#25282C;"
+        )
+        self.subtitle_label.setStyleSheet(
+            "background:transparent;border:0;"
+            f"font-size:{max(9, round(10 * ui_scale))}px;color:#777C84;"
+        )
+        self._sync_style(self.isChecked())
+
+    def _sync_style(self, checked: bool) -> None:
+        background = "#FFF9E8" if checked else "transparent"
+        hover = "#FFF5D8" if checked else "#FAFAFA"
+        button_radius = max(6, round(7 * self._ui_scale))
+        self.setStyleSheet(
+            f"QPushButton#step {{background:{background};border:0;"
+            f"border-radius:{button_radius}px;padding:0;}}"
+            f"QPushButton#step:hover {{background:{hover};border:0;}}"
+        )
+        badge_background = YELLOW if checked else "#ECEDEF"
+        badge_color = INK if checked else "#4F545B"
+        badge_radius = self.badge.width() // 2
+        badge_font_size = max(11, round(12 * self._ui_scale))
+        self.badge.setStyleSheet(
+            f"background:{badge_background};color:{badge_color};border:0;"
+            f"border-radius:{badge_radius}px;font-size:{badge_font_size}px;font-weight:600;"
+        )
 
 
 class DropZone(QFrame):
@@ -1242,6 +1392,7 @@ class ContinuousScreenshotOverlay(QDialog):
         for index, rect in enumerate(self.capture_rects, start=1):
             painter.drawPixmap(rect, self.desktop, rect)
             painter.setPen(QPen(QColor("#36C275"), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
             painter.setBrush(QColor("#36C275"))
             painter.drawRect(QRect(rect.left(), rect.top(), 28, 24))
@@ -1250,6 +1401,7 @@ class ContinuousScreenshotOverlay(QDialog):
         if not self.current.isNull():
             painter.drawPixmap(self.current, self.desktop, self.current)
             painter.setPen(QPen(QColor(YELLOW), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(self.current)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#1976D2"))
@@ -1357,7 +1509,7 @@ class ContinuousScreenshotOverlay(QDialog):
 
 
 class ScreenshotSessionDialog(QDialog):
-    """Multi-capture screenshot session with retake, delete, and merge."""
+    """Review the regions collected by the continuous screenshot overlay."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1367,28 +1519,13 @@ class ScreenshotSessionDialog(QDialog):
         self.output_path = ""
         layout = QVBoxLayout(self)
         layout.addWidget(section_label("截图列表"))
-        layout.addWidget(muted_label("可跨显示器多次框选；完成后选择横向或纵向拼接。"))
+        layout.addWidget(muted_label("可跨显示器多次框选；确认后进入拼接预览。"))
         self.list = QListWidget()
         self.list.setIconSize(QSize(150, 100))
         self.list.setViewMode(QListWidget.ViewMode.IconMode)
         self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.list.setSpacing(8)
         layout.addWidget(self.list, 1)
-        tools = QHBoxLayout()
-        add = QPushButton("继续截图")
-        add.clicked.connect(self.add_capture)
-        retake = QPushButton("重拍选中")
-        retake.clicked.connect(self.retake)
-        delete = QPushButton("删除选中")
-        delete.clicked.connect(self.delete_selected)
-        self.direction = QComboBox()
-        self.direction.addItems(["横向拼接", "纵向拼接"])
-        tools.addWidget(add)
-        tools.addWidget(retake)
-        tools.addWidget(delete)
-        tools.addStretch()
-        tools.addWidget(self.direction)
-        layout.addLayout(tools)
         footer = QHBoxLayout()
         footer.addStretch()
         cancel = QPushButton("取消")
@@ -1404,59 +1541,6 @@ class ScreenshotSessionDialog(QDialog):
         self.captures = [QPixmap(image) for image in captures if not image.isNull()]
         self.refresh()
 
-    def _capture_desktop_hidden(self) -> QPixmap:
-        main = self.parentWidget()
-        self.hide()
-        if main:
-            main.hide()
-        QApplication.processEvents()
-        time.sleep(.25)
-        desktop = grab_virtual_desktop()
-        if main:
-            main.show()
-            main.raise_()
-        self.show()
-        self.raise_()
-        QApplication.processEvents()
-        return desktop
-
-    def select_region(self, desktop: QPixmap | None = None) -> QPixmap:
-        desktop = desktop if desktop is not None else self._capture_desktop_hidden()
-        if desktop.isNull():
-            return QPixmap()
-        crop = CropDialog(desktop, "截图.png", self, direct=True)
-        if crop.exec() == QDialog.DialogCode.Accepted:
-            return crop.result_pixmap
-        return QPixmap()
-
-    def add_capture(self) -> None:
-        selected = self.select_region()
-        if not selected.isNull():
-            self.captures.append(selected)
-            self.refresh()
-
-    def add_from_desktop(self, desktop: QPixmap) -> None:
-        selected = self.select_region(desktop)
-        if not selected.isNull():
-            self.captures.append(selected)
-            self.refresh()
-
-    def retake(self) -> None:
-        row = self.list.currentRow()
-        if not 0 <= row < len(self.captures):
-            return
-        selected = self.select_region()
-        if not selected.isNull():
-            self.captures[row] = selected
-            self.refresh()
-            self.list.setCurrentRow(row)
-
-    def delete_selected(self) -> None:
-        row = self.list.currentRow()
-        if 0 <= row < len(self.captures):
-            self.captures.pop(row)
-            self.refresh()
-
     def refresh(self) -> None:
         self.list.clear()
         for index, pixmap in enumerate(self.captures, start=1):
@@ -1465,25 +1549,6 @@ class ScreenshotSessionDialog(QDialog):
             item = QListWidgetItem(QIcon(preview), f"截图 {index}\n{pixmap.width()}×{pixmap.height()}")
             item.setSizeHint(QSize(175, 135))
             self.list.addItem(item)
-
-    def merged(self) -> QPixmap:
-        if not self.captures:
-            return QPixmap()
-        horizontal = self.direction.currentIndex() == 0
-        width = sum(p.width() for p in self.captures) if horizontal else max(p.width() for p in self.captures)
-        height = max(p.height() for p in self.captures) if horizontal else sum(p.height() for p in self.captures)
-        output = QPixmap(width, height)
-        output.fill(QColor("white"))
-        painter = QPainter(output)
-        x = y = 0
-        for pixmap in self.captures:
-            painter.drawPixmap(x, y, pixmap)
-            if horizontal:
-                x += pixmap.width()
-            else:
-                y += pixmap.height()
-        painter.end()
-        return output
 
     def finish(self) -> None:
         if not self.captures:
@@ -1786,37 +1851,46 @@ class OCRPage(QWidget):
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 16, 20, 20)
-        outer.setSpacing(12)
+        self.outer_layout = outer
+        outer.setContentsMargins(16, 12, 16, 14)
+        outer.setSpacing(10)
 
         step_card = card()
+        self.step_card = step_card
         step_layout = QHBoxLayout(step_card)
-        step_layout.setContentsMargins(16, 8, 16, 8)
-        step_layout.setSpacing(12)
+        self.step_layout = step_layout
+        step_layout.setContentsMargins(12, 7, 12, 7)
+        step_layout.setSpacing(8)
         self.step_group = QButtonGroup(self)
         self.step_group.setExclusive(True)
         self.step_buttons: list[QPushButton] = []
+        self.step_widths = (210, 170, 180)
+        self.step_arrows: list[QLabel] = []
         for index, (title, subtitle) in enumerate([
             ("交互绘图", "标注与区域选择"),
             ("分类表格", "生成结构化数据"),
             ("文本报告", "生成识别报告"),
         ], start=1):
-            button = QPushButton(f"  {index}     {title}\n          {subtitle}")
-            button.setObjectName("step")
-            button.setCheckable(True)
+            button = StepButton(index, title, subtitle)
+            button.setFixedWidth(self.step_widths[index - 1])
             button.setProperty("pageIndex", index - 1)
             button.clicked.connect(lambda _checked=False, i=index - 1: self._switch_step(i))
             self.step_group.addButton(button)
             self.step_buttons.append(button)
-            step_layout.addWidget(button, 1)
+            step_layout.addWidget(button)
             if index < 3:
                 arrow = QLabel("›")
-                arrow.setStyleSheet("font-size:25px;color:#B6BBC2;")
+                arrow.setFixedWidth(12)
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                arrow.setStyleSheet("font-size:18px;font-weight:300;color:#B8BDC4;")
                 step_layout.addWidget(arrow)
+                self.step_arrows.append(arrow)
+        step_layout.addStretch(1)
         self.step_buttons[0].setChecked(True)
         outer.addWidget(step_card)
 
         self.top_notice_bar = QFrame()
+        self.top_notice_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         notice_layout = QHBoxLayout(self.top_notice_bar)
         notice_layout.setContentsMargins(0, 0, 8, 0)
         notice_layout.setSpacing(8)
@@ -1837,20 +1911,35 @@ class OCRPage(QWidget):
         self.notice_animation = QPropertyAnimation(self.notice_opacity, b"opacity", self)
         self.notice_animation.setDuration(320)
         self.notice_animation.finished.connect(self.top_notice_bar.hide)
-        outer.addWidget(self.top_notice_bar)
 
         workspace = QHBoxLayout()
-        workspace.setSpacing(12)
+        self.workspace_layout = workspace
+        workspace.setSpacing(10)
         outer.addLayout(workspace, 1)
 
         params = card()
-        params.setFixedWidth(292)
+        self.params_card = params
+        params.setProperty("panelRole", "parameters")
+        params.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        add_shadow(params, blur=24, opacity=26)
+        params.setFixedWidth(210)
         params_layout = QVBoxLayout(params)
+        self.params_layout = params_layout
         params_layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
+        self.params_scroll = scroll
+        scroll.setObjectName("paramsScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.viewport().setStyleSheet("background:transparent;")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_content = QWidget()
+        scroll_content.setObjectName("paramsContent")
+        scroll_content.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         scroll_layout = QVBoxLayout(scroll_content)
+        self.params_content_layout = scroll_layout
         scroll_layout.setContentsMargins(14, 14, 14, 10)
         scroll_layout.setSpacing(9)
 
@@ -1879,42 +1968,65 @@ class OCRPage(QWidget):
         for mode, name in MODE_NAMES.items():
             button = QPushButton(name)
             button.setObjectName("recognitionMode")
+            button.setProperty("compactParam", "true")
             button.setCheckable(True)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
             button.clicked.connect(lambda _checked=False, value=mode: self.select_mode(value))
             self.mode_group.addButton(button)
             self.mode_buttons[mode] = button
-            mode_row.addWidget(button)
+            mode_row.addWidget(button, 1)
         self.mode_buttons["accurate"].setChecked(True)
         scroll_layout.addLayout(mode_row)
 
         scroll_layout.addWidget(section_label("3. 图片处理"))
         process_row = QHBoxLayout()
+        self.process_buttons: list[QPushButton] = []
         for title, handler in [
             ("拼接", self.merge_images),
             ("截图", self.capture_screen),
             ("裁剪", self.crop_image),
         ]:
             button = QPushButton(title)
+            button.setProperty("compactParam", "true")
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
             button.clicked.connect(handler)
-            process_row.addWidget(button)
+            process_row.addWidget(button, 1)
+            self.process_buttons.append(button)
         scroll_layout.addLayout(process_row)
 
         scroll_layout.addWidget(section_label("4. 坐标模式"))
+        self.coordinate_layout = QVBoxLayout()
+        self.coordinate_layout.setContentsMargins(0, 0, 0, 0)
+        self.coordinate_layout.setSpacing(3)
         self.line_radio = QRadioButton("直线模式")
         self.lasso_radio = QRadioButton("圈选模式")
         self.line_radio.setChecked(True)
         self.line_radio.toggled.connect(lambda checked: self.plot.set_lasso_mode(not checked) if hasattr(self, "plot") else None)
         self.lasso_radio.toggled.connect(self._lasso_mode_changed)
-        scroll_layout.addWidget(self.line_radio)
-        scroll_layout.addWidget(self.lasso_radio)
-        clear_classification = QPushButton("清理直线和圈选分类")
-        clear_classification.clicked.connect(self.clear_line_and_lasso_classification)
-        scroll_layout.addWidget(clear_classification)
+        self.coordinate_layout.addWidget(self.line_radio)
+        self.coordinate_layout.addWidget(self.lasso_radio)
+        self.clear_classification_button = QPushButton("清理直线和圈选分类")
+        self.clear_classification_button.setFixedHeight(30)
+        self.clear_classification_button.clicked.connect(
+            self.clear_line_and_lasso_classification
+        )
+        self.coordinate_layout.addWidget(self.clear_classification_button)
+        scroll_layout.addLayout(self.coordinate_layout)
 
         scroll_layout.addWidget(section_label("5. 书籍信息"))
         form = QFormLayout()
         self.book_name = QLineEdit(str(self.repository.get("book_name", "")))
+        self.book_name.setProperty("compactParamInput", "true")
+        self.book_name.setMinimumWidth(0)
         self.book_page = QSpinBox()
+        self.book_page.setProperty("compactParamInput", "true")
+        self.book_page.setMinimumWidth(0)
         self.book_page.setRange(1, 999999)
         self.book_page.setValue(int(self.repository.get("book_page", 1) or 1))
         form.addRow("书名", self.book_name)
@@ -1925,14 +2037,27 @@ class OCRPage(QWidget):
         params_layout.addWidget(scroll, 1)
         self.start_button = QPushButton("开始识别")
         self.start_button.setObjectName("primary")
-        self.start_button.setMinimumHeight(46)
+        self.start_button.setFixedHeight(48)
+        self.start_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.start_button.setStyleSheet(
+            f"QPushButton#primary {{background:{YELLOW};border:0;border-radius:0;"
+            "border-bottom-left-radius:7px;border-bottom-right-radius:7px;"
+            "font-weight:700;padding:0;}"
+            "QPushButton#primary:hover {background:#F2B900;border:0;}"
+            "QPushButton#primary:pressed {background:#E8AE00;border:0;}"
+        )
         self.start_button.clicked.connect(self.start_ocr)
         params_layout.addWidget(self.start_button)
-        params_layout.setContentsMargins(10, 10, 10, 10)
+        params_layout.setContentsMargins(1, 1, 1, 1)
+        params_layout.setSpacing(0)
         workspace.addWidget(params)
 
         result_card = card()
+        self.result_card = result_card
         result_layout = QVBoxLayout(result_card)
+        self.result_layout = result_layout
         result_layout.setContentsMargins(10, 10, 10, 10)
         self.result_stack = QStackedWidget()
         self.plot = PlotCanvas()
@@ -1952,6 +2077,94 @@ class OCRPage(QWidget):
         self.cancel_lasso_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.cancel_lasso_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.cancel_lasso_shortcut.activated.connect(self.cancel_lasso_selection)
+        self.apply_layout_scale(1.0, 1.0, 1.0)
+
+    def apply_layout_scale(self, x_scale: float, y_scale: float,
+                           ui_scale: float) -> None:
+        """Keep the OCR workspace proportional to the 1050 x 730 design."""
+        self.outer_layout.setContentsMargins(
+            round(16 * x_scale), round(12 * y_scale),
+            round(16 * x_scale), round(14 * y_scale),
+        )
+        self.outer_layout.setSpacing(max(8, round(10 * ui_scale)))
+        self.step_layout.setContentsMargins(
+            round(12 * x_scale), round(7 * y_scale),
+            round(12 * x_scale), round(7 * y_scale),
+        )
+        self.step_layout.setSpacing(max(6, round(8 * ui_scale)))
+        step_button_height = max(50, round(56 * y_scale))
+        step_vertical_margin = round(7 * y_scale)
+        self.step_card.setFixedHeight(
+            step_button_height + step_vertical_margin * 2 + 2
+        )
+        for width, button in zip(self.step_widths, self.step_buttons):
+            button.setFixedWidth(round(width * x_scale))
+            if isinstance(button, StepButton):
+                button.apply_scale(x_scale, y_scale, ui_scale)
+        for arrow in self.step_arrows:
+            arrow.setFixedWidth(max(10, round(12 * x_scale)))
+            arrow.setStyleSheet(
+                f"font-size:{max(16, round(18 * ui_scale))}px;"
+                "font-weight:300;color:#B8BDC4;"
+            )
+        self.workspace_layout.setSpacing(max(8, round(10 * x_scale)))
+        self.params_card.setFixedWidth(round(210 * x_scale))
+        self.params_content_layout.setContentsMargins(
+            round(14 * x_scale), round(12 * y_scale),
+            round(14 * x_scale), round(8 * y_scale),
+        )
+        self.params_content_layout.setSpacing(max(6, round(7 * ui_scale)))
+        self.coordinate_layout.setSpacing(max(2, round(3 * ui_scale)))
+        compact_button_height = max(27, round(28 * y_scale))
+        compact_padding = max(6, round(8 * x_scale))
+        for button in self.mode_buttons.values():
+            button.setStyleSheet(
+                f"QPushButton#recognitionMode {{min-height:0;"
+                f"max-height:{compact_button_height}px;padding:0 {compact_padding}px;"
+                "background:#F6F7F9;border:1px solid #ECEEF1;border-radius:6px;}"
+                f"QPushButton#recognitionMode:checked {{background:{YELLOW};"
+                f"border-color:{YELLOW};color:{INK};font-weight:700;}}"
+                "QPushButton#recognitionMode:hover {background:#FFF8DF;"
+                "border-color:#F4D66B;}"
+            )
+            button.setFixedHeight(compact_button_height)
+        for button in self.process_buttons:
+            button.setStyleSheet(
+                f"min-height:0;max-height:{compact_button_height}px;"
+                f"padding:0 {compact_padding}px;background:#F6F7F9;"
+                "border:1px solid #ECEEF1;border-radius:6px;"
+            )
+            button.setFixedHeight(compact_button_height)
+        compact_input_height = max(29, round(30 * y_scale))
+        for field in (self.book_name, self.book_page):
+            field.setStyleSheet(
+                f"min-height:0;max-height:{compact_input_height}px;"
+                f"padding:0 {max(6, round(8 * x_scale))}px;"
+            )
+            field.setFixedHeight(compact_input_height)
+        clear_height = max(27, round(28 * y_scale))
+        self.clear_classification_button.setStyleSheet(
+            f"min-height:0;max-height:{clear_height}px;"
+            f"padding:0 {max(7, round(9 * x_scale))}px;"
+            f"font-size:{max(10, round(11 * ui_scale))}px;"
+            "background:#F8F9FA;border:1px solid #E9EBEE;border-radius:6px;"
+        )
+        self.clear_classification_button.setFixedHeight(clear_height)
+        self.drop_zone.setMinimumHeight(max(104, round(112 * y_scale)))
+        self.start_button.setFixedHeight(max(40, round(48 * y_scale)))
+        params_radius = max(10, round(12 * ui_scale))
+        self.start_button.setStyleSheet(
+            f"QPushButton#primary {{background:{YELLOW};border:0;border-radius:0;"
+            f"border-bottom-left-radius:{params_radius - 1}px;"
+            f"border-bottom-right-radius:{params_radius - 1}px;"
+            "font-weight:700;padding:0;}"
+            "QPushButton#primary:hover {background:#F2B900;border:0;}"
+            "QPushButton#primary:pressed {background:#E8AE00;border:0;}"
+        )
+        self.result_layout.setContentsMargins(
+            round(10 * x_scale), round(10 * y_scale),
+            round(10 * x_scale), round(10 * y_scale),
+        )
 
     def _build_table_page(self) -> tuple[QWidget, QTableWidget]:
         page = QWidget()
@@ -2000,6 +2213,7 @@ class OCRPage(QWidget):
         initial_size = int(font_config.get("font_size", 11) or 11)
         table.setProperty("classifierFontSize", initial_size)
         table.setFont(QFont("Microsoft YaHei UI", initial_size, QFont.Weight.Bold))
+        table.setStyleSheet(self._classifier_table_font_style(initial_size))
         header_font = table.horizontalHeader().font()
         header_font.setPointSize(max(8, initial_size - 1))
         header_font.setBold(True)
@@ -2112,6 +2326,13 @@ class OCRPage(QWidget):
         )
         self.notice_undo_button.setVisible(bool(undo_available))
         self.top_notice_bar.show()
+        self.top_notice_bar.adjustSize()
+        self.top_notice_bar.raise_()
+        parent = self.top_notice_bar.parentWidget()
+        positioner = getattr(parent, "_position_notice_toast", None)
+        if callable(positioner):
+            positioner()
+            QTimer.singleShot(0, positioner)
         self.notice_timer.start(max(1000, int(duration)))
 
     def _fade_top_notice(self) -> None:
@@ -2504,6 +2725,18 @@ class OCRPage(QWidget):
         self._populate_results(redraw_plot=bool(state.get("_redraw_plot", True)))
 
     @staticmethod
+    def _classifier_table_font_style(font_size: int) -> str:
+        return (
+            "QTableWidget {"
+            f"font-size:{font_size}pt;"
+            "font-weight:bold;"
+            "}"
+            "QTableWidget::item {"
+            f"font-size:{font_size}pt;"
+            "}"
+        )
+
+    @staticmethod
     def _group_button_style(font_size: int) -> str:
         return (
             "QComboBox#groupCell {"
@@ -2792,11 +3025,19 @@ class OCRPage(QWidget):
         if hasattr(self, "table"):
             self.table.setProperty("classifierFontSize", size)
             self.table.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            self.table.setStyleSheet(self._classifier_table_font_style(size))
             header_font = self.table.horizontalHeader().font()
             header_font.setPointSize(max(8, size - 1))
             header_font.setBold(True)
             self.table.horizontalHeader().setFont(header_font)
             self.table.verticalHeader().setDefaultSectionSize(max(size * 2 + 12, 34))
+            for row in range(self.table.rowCount()):
+                for column in range(self.table.columnCount()):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item_font = item.font()
+                        item_font.setPointSize(size)
+                        item.setFont(item_font)
             for row in range(self.table.rowCount()):
                 widget = self.table.cellWidget(row, 5)
                 if isinstance(widget, GroupCellButton):
@@ -2805,6 +3046,9 @@ class OCRPage(QWidget):
             self.table.viewport().update()
         if hasattr(self, "report"):
             self.report.setFont(QFont("Microsoft YaHei UI", size, QFont.Weight.Bold))
+            self.report.setStyleSheet(
+                f"QTextEdit {{font-size:{size}pt;font-weight:bold;}}"
+            )
 
     def set_shared_font_size(self, size: int) -> None:
         self._apply_shared_font_size(size)
@@ -3913,7 +4157,6 @@ class OCRPage(QWidget):
             preview = MergePreviewDialog(
                 self.repository, session.captures, "screenshot", [], self.mode, True, self
             )
-            preview.direction.setCurrentIndex(session.direction.currentIndex())
             if preview.exec() == QDialog.DialogCode.Accepted and preview.output_path:
                 self.mode = preview.selected_mode
                 self.mode_buttons[self.mode].setChecked(True)
@@ -4082,7 +4325,7 @@ class HomePage(QWidget):
         self.period_label = muted_label("")
         title_row.addWidget(self.period_label)
         layout.addLayout(title_row)
-        layout.addWidget(muted_label("接口调用不包含缓存复用；缓存卡片显示高精度与通用的合计。"))
+        layout.addWidget(muted_label("接口调用不包含缓存复用；缓存复用按高精度与通用分别统计。"))
 
         cards = QGridLayout()
         cards.setHorizontalSpacing(12)
@@ -4091,12 +4334,14 @@ class HomePage(QWidget):
         definitions = [
             ("today_accurate", "今日高精度调用"),
             ("today_general", "今日通用调用"),
-            ("today_cache", "今日缓存复用"),
+            ("today_accurate_cache", "今日高精度缓存"),
+            ("today_general_cache", "今日通用缓存"),
             ("month_accurate", "本月高精度调用"),
             ("month_general", "本月通用调用"),
-            ("month_cache", "本月缓存复用"),
+            ("month_accurate_cache", "本月高精度缓存"),
+            ("month_general_cache", "本月通用缓存"),
         ]
-        for column in range(3):
+        for column in range(4):
             cards.setColumnStretch(column, 1)
         for index, (key, heading) in enumerate(definitions):
             frame = QFrame()
@@ -4119,7 +4364,7 @@ class HomePage(QWidget):
             box.addWidget(heading_label)
             box.addWidget(value)
             self.stat_values[key] = value
-            cards.addWidget(frame, index // 3, index % 3)
+            cards.addWidget(frame, index // 4, index % 4)
         layout.addLayout(cards)
 
         chart_card = card()
@@ -4165,10 +4410,12 @@ class HomePage(QWidget):
         values = {
             "today_accurate": today_accurate_api,
             "today_general": today_general_api,
-            "today_cache": today_accurate_cache + today_general_cache,
+            "today_accurate_cache": today_accurate_cache,
+            "today_general_cache": today_general_cache,
             "month_accurate": month_accurate_api,
             "month_general": month_general_api,
-            "month_cache": month_accurate_cache + month_general_cache,
+            "month_accurate_cache": month_accurate_cache,
+            "month_general_cache": month_general_cache,
         }
         for key, value in values.items():
             self.stat_values[key].setText(str(value))
@@ -4561,11 +4808,31 @@ class StatsPage(QWidget):
         total_layout = QVBoxLayout(total_page)
         total_controls = QHBoxLayout()
         total_controls.addWidget(QLabel("查看模式"))
-        self.total_mode = QComboBox()
-        for mode, label in MODE_NAMES.items():
-            self.total_mode.addItem(label, mode)
-        self.total_mode.currentIndexChanged.connect(self.refresh_total)
-        total_controls.addWidget(self.total_mode)
+        self.total_mode = "accurate"
+        self.total_mode_group = QButtonGroup(self)
+        self.total_mode_group.setExclusive(True)
+        self.total_mode_buttons: dict[str, QPushButton] = {}
+        for mode in ("accurate", "general"):
+            button = QPushButton(MODE_NAMES[mode])
+            button.setObjectName("statsViewMode")
+            button.setCheckable(True)
+            button.setChecked(mode == self.total_mode)
+            button.setStyleSheet(
+                "QPushButton#statsViewMode {min-height:30px;padding:0 14px;"
+                "background:#FFFFFF;color:#0066FF;border:1px solid #D6E4FF;"
+                "border-radius:6px;font-weight:600;}"
+                "QPushButton#statsViewMode:hover {background:#FFFFFF;"
+                "border-color:#0066FF;}"
+                "QPushButton#statsViewMode:checked {background:#FFFFFF;"
+                "color:#0066FF;border:2px solid #0066FF;font-weight:700;}"
+            )
+            button.clicked.connect(
+                lambda checked=False, value=mode: self.select_total_mode(value)
+                if checked else None
+            )
+            self.total_mode_group.addButton(button)
+            self.total_mode_buttons[mode] = button
+            total_controls.addWidget(button)
         total_controls.addStretch()
         self.total_overall = muted_label("")
         total_controls.addWidget(self.total_overall)
@@ -4589,32 +4856,6 @@ class StatsPage(QWidget):
         ])
         total_layout.addWidget(self.total_table, 1)
         self.tabs.addTab(total_page, "总计")
-
-        daily_page = QWidget()
-        daily_layout = QVBoxLayout(daily_page)
-        self.daily_table = self._make_table([
-            "日期", "模式", "批次", "处理", "接口成功", "缓存", "失败", "总行数", "接口行数"
-        ])
-        self.table = self.daily_table
-        daily_layout.addWidget(self.daily_table)
-        self.tabs.addTab(daily_page, "按日")
-
-        monthly_page = QWidget()
-        monthly_layout = QVBoxLayout(monthly_page)
-        monthly_controls = QHBoxLayout()
-        monthly_controls.addWidget(QLabel("查看模式"))
-        self.monthly_mode = QComboBox()
-        for mode, label in MODE_NAMES.items():
-            self.monthly_mode.addItem(label, mode)
-        self.monthly_mode.currentIndexChanged.connect(self.refresh_monthly)
-        monthly_controls.addWidget(self.monthly_mode)
-        monthly_controls.addStretch()
-        monthly_layout.addLayout(monthly_controls)
-        self.monthly_table = self._make_table([
-            "月份", "使用天数", "接口调用", "缓存复用", "日均接口", "日均缓存"
-        ])
-        monthly_layout.addWidget(self.monthly_table)
-        self.tabs.addTab(monthly_page, "按月")
 
         chart_page = QWidget()
         chart_layout = QVBoxLayout(chart_page)
@@ -4670,8 +4911,12 @@ class StatsPage(QWidget):
         except (TypeError, ValueError):
             return 0
 
-    def _selected_mode(self, combo: QComboBox) -> str:
-        return str(combo.currentData() or "accurate")
+    def select_total_mode(self, mode: str) -> None:
+        if mode not in self.total_mode_buttons:
+            return
+        self.total_mode = mode
+        self.total_mode_buttons[mode].setChecked(True)
+        self.refresh_total()
 
     def _set_table_rows(self, table: QTableWidget, rows: list[list[Any]]) -> None:
         table.setSortingEnabled(False)
@@ -4687,8 +4932,6 @@ class StatsPage(QWidget):
         value = self.repository.get("stats", {}) or {}
         self.stats = value if isinstance(value, dict) else {}
         self.refresh_total()
-        self.refresh_daily()
-        self.refresh_monthly()
         current_date = self.chart_date.currentText()
         dates = sorted(self.stats, reverse=True)
         self.chart_date.blockSignals(True)
@@ -4729,7 +4972,7 @@ class StatsPage(QWidget):
         QMessageBox.information(self, "清空完成", "OCR 调用统计已全部清空。")
 
     def refresh_total(self, *_args) -> None:
-        mode = self._selected_mode(self.total_mode)
+        mode = self.total_mode
         rows: list[dict[str, Any]] = []
         month_totals: dict[str, dict[str, int]] = {}
         for day in sorted(self.stats):
@@ -4768,39 +5011,6 @@ class StatsPage(QWidget):
             f"全部 {len(self.stats)} 天 · 接口 {sum(row['api'] for row in rows):,} · "
             f"缓存 {sum(row['cache'] for row in rows):,}"
         )
-
-    def refresh_daily(self) -> None:
-        rows: list[list[Any]] = []
-        for day in sorted(self.stats, reverse=True):
-            for mode in ("accurate", "basic", "general"):
-                values = self.stats.get(day, {}).get(mode, {}) or {}
-                rows.append([
-                    day, MODE_NAMES[mode], values.get("count", 0), values.get("processed", 0),
-                    values.get("success", 0), values.get("cached", 0), values.get("failed", 0),
-                    values.get("lines", 0), values.get("api_lines", 0),
-                ])
-        self._set_table_rows(self.daily_table, rows)
-
-    def refresh_monthly(self, *_args) -> None:
-        mode = self._selected_mode(self.monthly_mode)
-        monthly: dict[str, dict[str, Any]] = {}
-        for day, day_data in self.stats.items():
-            month = day[:7]
-            state = monthly.setdefault(month, {"days": set(), "api": 0, "cache": 0})
-            state["days"].add(day)
-            values = day_data.get(mode, {}) or {}
-            state["api"] += self._number(values.get("success"))
-            state["cache"] += self._number(values.get("cached"))
-        rows = []
-        for month in sorted(monthly, reverse=True):
-            state = monthly[month]
-            days = len(state["days"])
-            rows.append([
-                month, days, f"{state['api']:,}", f"{state['cache']:,}",
-                f"{state['api'] / days:.1f}" if days else "0.0",
-                f"{state['cache'] / days:.1f}" if days else "0.0",
-            ])
-        self._set_table_rows(self.monthly_table, rows)
 
     def refresh_chart(self) -> None:
         date = self.chart_date.currentText()
@@ -5869,9 +6079,11 @@ class MainWindow(QMainWindow):
         transparent_icon = QPixmap(16, 16)
         transparent_icon.fill(Qt.GlobalColor.transparent)
         self.setWindowIcon(QIcon(transparent_icon))
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1000, 680)
         config = self.repository.get("qt_window_config", {}) or {}
-        self.resize(int(config.get("width", 1440)), int(config.get("height", 920)))
+        self.resize(int(config.get("width", 1050)), int(config.get("height", 730)))
+        self._responsive_key: tuple[int, int] | None = None
+        self._responsive_ui_scale = 1.0
         self._build()
 
     def _build(self) -> None:
@@ -5883,35 +6095,74 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         header = QFrame()
+        self.header = header
         header.setObjectName("header")
-        header.setFixedHeight(62)
+        header.setFixedHeight(48)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(22, 0, 18, 0)
+        self.header_layout = header_layout
+        header_layout.setContentsMargins(18, 0, 14, 0)
+        header_layout.setSpacing(8)
         menu = QLabel("☰")
-        menu.setStyleSheet("font-size:20px;")
-        logo = QLabel("▥")
-        logo.setStyleSheet(f"font-size:24px;color:{YELLOW_DARK};font-weight:700;")
+        self.menu_label = menu
+        menu.setFixedWidth(18)
+        menu.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        menu.setStyleSheet("font-size:16px;color:#4F545B;")
+
+        logo = QWidget()
+        self.logo_widget = logo
+        logo.setFixedSize(18, 20)
+        logo_layout = QHBoxLayout(logo)
+        logo_layout.setContentsMargins(1, 2, 1, 2)
+        logo_layout.setSpacing(2)
+        self.logo_bars: list[QFrame] = []
+        for height in (7, 12, 16):
+            bar = QFrame()
+            bar.setFixedSize(4, height)
+            bar.setStyleSheet(f"background:{YELLOW};border-radius:1px;")
+            logo_layout.addWidget(bar, 0, Qt.AlignmentFlag.AlignBottom)
+            self.logo_bars.append(bar)
+
         title = QLabel("OCR 数据分类工具")
         title.setObjectName("appTitle")
         header_layout.addWidget(menu)
-        header_layout.addSpacing(8)
+        header_layout.addSpacing(2)
         header_layout.addWidget(logo)
+        header_layout.addSpacing(1)
         header_layout.addWidget(title)
         header_layout.addStretch()
-        font_size_label = QLabel("字号")
+
+        self.font_size_label = QLabel("字号")
         font_config = self.repository.get("font_config", {}) or {}
-        self.font_size = QSpinBox()
-        self.font_size.setRange(8, 30)
-        self.font_size.setValue(int(font_config.get("font_size", 11) or 11))
-        self.font_size.setFixedWidth(64)
+        initial_font_size = max(8, min(30, int(font_config.get("font_size", 11) or 11)))
+        self.font_size = QComboBox()
+        self.font_size.addItems([str(size) for size in range(8, 31)])
+        self.font_size.setCurrentText(str(initial_font_size))
+        self.font_size.setFixedSize(64, 30)
+        self.font_size.setToolTip("调整分类表格和文本报告的字号")
+        self.font_size.setStyleSheet(
+            "QComboBox {min-height:0;max-height:28px;padding:0 7px;"
+            "background:#FFFFFF;border:1px solid #E2E5E9;border-radius:6px;}"
+        )
+
         settings = QPushButton("⚙  设置")
-        settings.setStyleSheet("border:0;background:transparent;")
+        self.settings_button = settings
+        settings.setFixedHeight(30)
+        settings.setStyleSheet(
+            "border:0;background:transparent;padding:0 8px;"
+            "font-size:12px;color:#4F545B;"
+        )
         settings.clicked.connect(self.open_settings)
         help_button = QPushButton("ⓘ  帮助")
-        help_button.setStyleSheet("border:0;background:transparent;")
+        self.help_button = help_button
+        help_button.setFixedHeight(30)
+        help_button.setStyleSheet(
+            "border:0;background:transparent;padding:0 8px;"
+            "font-size:12px;color:#4F545B;"
+        )
         help_button.clicked.connect(self.show_help)
-        header_layout.addWidget(font_size_label)
+        header_layout.addWidget(self.font_size_label)
         header_layout.addWidget(self.font_size)
+        header_layout.addSpacing(2)
         header_layout.addWidget(settings)
         header_layout.addWidget(help_button)
         root_layout.addWidget(header)
@@ -5922,47 +6173,62 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(body, 1)
 
         sidebar = QFrame()
+        self.sidebar = sidebar
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(190)
+        sidebar.setFixedWidth(150)
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(0, 22, 0, 0)
+        self.sidebar_layout = sidebar_layout
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
+
+        self.sidebar_menu = QWidget()
+        self.sidebar_menu.setFixedHeight(32)
+        self.sidebar_menu_layout = QHBoxLayout(self.sidebar_menu)
+        self.sidebar_menu_layout.setContentsMargins(16, 0, 0, 0)
+        self.sidebar_menu_layout.setSpacing(0)
+        self.sidebar_menu_icon = QLabel()
+        self.sidebar_menu_qicon = sidebar_icon("menu")
+        self.sidebar_menu_icon.setPixmap(
+            self.sidebar_menu_qicon.pixmap(QSize(14, 14))
+        )
+        self.sidebar_menu_layout.addWidget(self.sidebar_menu_icon)
+        self.sidebar_menu_layout.addStretch()
+        sidebar_layout.addWidget(self.sidebar_menu)
+
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.stack = QStackedWidget()
 
         self.home_page = HomePage(self.repository)
         self.ocr_page = OCRPage(self.repository)
-        self.ocr_page.top_notice_bar.setParent(header)
-        self.ocr_page.top_notice_bar.setMaximumWidth(560)
+        self.ocr_page.top_notice_bar.setParent(self)
+        self.ocr_page.top_notice_bar.setFixedWidth(380)
         self.ocr_page.top_notice_bar.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum
         )
-        header_layout.insertWidget(4, self.ocr_page.top_notice_bar, 1)
+        self.ocr_page.top_notice_bar.hide()
         self.gallery_page = GalleryPage(self.repository)
         self.history_page = HistoryPage(self.repository)
         self.keys_page = KeysPage()
         self.stats_page = StatsPage(self.repository)
         self.rules_page = RulesPage(self.repository)
         pages = [
-            ("\ue80f", "首页", self.home_page),
-            ("\ue8a5", "OCR 识别", self.ocr_page),
-            ("\ue91b", "图片预览", self.gallery_page),
-            ("\ue81c", "历史记录", self.history_page),
-            ("\ue8d7", "密钥管理", self.keys_page),
-            ("\ue9d2", "统计", self.stats_page),
-            ("\ue8b3", "规则尺寸", self.rules_page),
+            ("home", "首页", self.home_page),
+            ("ocr", "OCR 识别", self.ocr_page),
+            ("image", "图片预览", self.gallery_page),
+            ("history", "历史记录", self.history_page),
+            ("key", "密钥管理", self.keys_page),
+            ("stats", "统计", self.stats_page),
+            ("rules", "规则尺寸", self.rules_page),
         ]
         self.nav_buttons: list[QPushButton] = []
-        icon_font = QFont("Segoe MDL2 Assets", 14)
         for index, (icon, name, page) in enumerate(pages):
             self.stack.addWidget(page)
-            button = QPushButton(f"{icon}     {name}")
+            button = QPushButton(f"  {name}")
             button.setObjectName("nav")
             button.setCheckable(True)
-            button.setFont(QFont("Microsoft YaHei UI", 11))
-            # Qt cannot mix two fonts in a plain button. The MDL2 glyphs still
-            # resolve through Windows font fallback while text stays YaHei.
+            button.setIcon(sidebar_icon(icon))
+            button.setIconSize(QSize(18, 18))
             button.clicked.connect(lambda _checked=False, i=index: self.open_page(i))
             self.nav_group.addButton(button)
             self.nav_buttons.append(button)
@@ -5972,6 +6238,7 @@ class MainWindow(QMainWindow):
         self.status_frame = QFrame()
         self.status_frame.setStyleSheet("background:#FFFFFF;border-top:1px solid #E8EAED;")
         status_layout = QHBoxLayout(self.status_frame)
+        self.status_layout = status_layout
         status_layout.setContentsMargins(16, 9, 10, 9)
         self.status_dot = QLabel("●")
         self.status_dot.setStyleSheet("color:#3B82F6;")
@@ -5987,11 +6254,138 @@ class MainWindow(QMainWindow):
         self.ocr_page.statusChanged.connect(self.set_status)
         self.ocr_page.dataChanged.connect(self.refresh_data_pages)
         self.stats_page.statsCleared.connect(self.home_page.refresh)
-        self.font_size.valueChanged.connect(self.ocr_page.set_shared_font_size)
+        self.font_size.currentTextChanged.connect(
+            lambda value: self.ocr_page.set_shared_font_size(int(value))
+        )
         self.history_page.parseRequested.connect(self.parse_history_record)
         self.keys_page.keysChanged.connect(self.ocr_page._refresh_key_states)
         self.nav_buttons[1].setChecked(True)
         self.open_page(1)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Scale the shell and OCR workspace from the 1050 x 730 reference."""
+        x_scale = max(0.90, min(1.60, self.width() / 1050.0))
+        y_scale = max(0.90, min(1.45, self.height() / 730.0))
+        ui_scale = min(x_scale, y_scale)
+        key = (round(x_scale * 100), round(y_scale * 100))
+        if key == self._responsive_key:
+            return
+        self._responsive_key = key
+        self._responsive_ui_scale = ui_scale
+
+        self.header.setFixedHeight(round(48 * y_scale))
+        self.header_layout.setContentsMargins(
+            round(18 * x_scale), 0, round(14 * x_scale), 0
+        )
+        self.header_layout.setSpacing(max(7, round(8 * ui_scale)))
+        self.menu_label.setFixedWidth(round(18 * ui_scale))
+        self.menu_label.setStyleSheet(
+            f"font-size:{max(15, round(16 * ui_scale))}px;color:#4F545B;"
+        )
+        self.logo_widget.setFixedSize(
+            round(18 * ui_scale), round(20 * ui_scale)
+        )
+        for bar, base_height in zip(self.logo_bars, (7, 12, 16)):
+            bar.setFixedSize(
+                max(3, round(4 * ui_scale)), max(6, round(base_height * ui_scale))
+            )
+        header_button_height = max(28, round(30 * y_scale))
+        header_font_size = max(11, round(12 * ui_scale))
+        header_padding = max(7, round(8 * x_scale))
+        self.font_size_label.setStyleSheet(
+            f"font-size:{header_font_size}px;color:#4F545B;background:transparent;"
+        )
+        self.font_size.setFixedSize(
+            max(58, round(64 * x_scale)), header_button_height
+        )
+        self.font_size.setStyleSheet(
+            f"QComboBox {{min-height:0;max-height:{max(26, header_button_height - 2)}px;"
+            f"padding:0 {max(6, round(7 * x_scale))}px;"
+            f"font-size:{max(10, round(11 * ui_scale))}px;background:#FFFFFF;"
+            "border:1px solid #E2E5E9;border-radius:6px;}"
+        )
+        for button in (self.settings_button, self.help_button):
+            button.setFixedHeight(header_button_height)
+            button.setStyleSheet(
+                f"border:0;background:transparent;padding:0 {header_padding}px;"
+                f"font-size:{header_font_size}px;color:#4F545B;"
+            )
+
+        self.sidebar.setFixedWidth(round(150 * x_scale))
+        self.sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        self.sidebar_menu.setFixedHeight(max(28, round(32 * y_scale)))
+        self.sidebar_menu_layout.setContentsMargins(
+            round(16 * x_scale), 0, 0, 0
+        )
+        menu_icon_size = max(13, round(14 * ui_scale))
+        self.sidebar_menu_icon.setPixmap(
+            self.sidebar_menu_qicon.pixmap(QSize(menu_icon_size, menu_icon_size))
+        )
+        nav_height = max(46, round(52 * y_scale))
+        nav_font_size = max(12, round(13 * ui_scale))
+        nav_padding = max(14, round(16 * x_scale))
+        checked_padding = max(11, nav_padding - round(3 * x_scale))
+        nav_icon_size = max(17, round(18 * ui_scale))
+        compact_button_height = max(24, round(26 * y_scale))
+        compact_input_height = max(25, round(27 * y_scale))
+        for button in self.nav_buttons:
+            button.setIconSize(QSize(nav_icon_size, nav_icon_size))
+        self.setStyleSheet(
+            f"QLabel#appTitle {{font-size:{max(14, round(15 * ui_scale))}px;"
+            "font-weight:700;}"
+            f"QLabel#sectionTitle {{font-size:{max(11, round(12 * ui_scale))}px;"
+            "font-weight:700;}"
+            f"QLabel#muted {{font-size:{max(9, round(10 * ui_scale))}px;color:{MUTED};}}"
+            f"QPushButton#nav {{min-height:{nav_height}px;max-height:{nav_height}px;"
+            f"padding-left:{nav_padding}px;font-size:{nav_font_size}px;}}"
+            f"QPushButton#nav:checked {{background:#FFF7E3;color:#30343A;"
+            f"border-left:{max(3, round(3 * x_scale))}px solid {YELLOW};"
+            f"padding-left:{checked_padding}px;}}"
+            f"QFrame#card {{background:#FFFFFF;border:1px solid #EEF0F2;"
+            f"border-radius:{max(7, round(8 * ui_scale))}px;}}"
+            f"QFrame#card[panelRole=\"parameters\"] {{background:#FFFFFF;"
+            f"border:1px solid #E7E9EC;border-radius:{max(10, round(12 * ui_scale))}px;}}"
+            f"QLineEdit,QSpinBox,QDoubleSpinBox {{min-height:{max(31, round(34 * y_scale))}px;"
+            f"font-size:{max(11, round(12 * ui_scale))}px;}}"
+            f"QRadioButton {{font-size:{max(11, round(12 * ui_scale))}px;}}"
+            f"QPushButton[compactParam=\"true\"] {{min-height:{compact_button_height}px;"
+            f"max-height:{compact_button_height}px;padding:0 {max(6, round(8 * x_scale))}px;}}"
+            f"QLineEdit[compactParamInput=\"true\"],"
+            f"QSpinBox[compactParamInput=\"true\"] {{min-height:{compact_input_height}px;"
+            f"max-height:{compact_input_height}px;padding:0 {max(6, round(8 * x_scale))}px;}}"
+        )
+        self.status_layout.setContentsMargins(
+            round(16 * x_scale), round(9 * y_scale),
+            round(10 * x_scale), round(9 * y_scale),
+        )
+        status_font_size = max(10, round(12 * ui_scale))
+        self.status_text.setStyleSheet(
+            f"color:#6F747C;font-size:{status_font_size}px;"
+        )
+        toast_width = min(
+            max(320, round(380 * ui_scale)), max(320, self.width() - 40)
+        )
+        self.ocr_page.top_notice_bar.setFixedWidth(toast_width)
+        self.ocr_page.apply_layout_scale(x_scale, y_scale, ui_scale)
+        self._position_notice_toast()
+
+    def _position_notice_toast(self) -> None:
+        if not hasattr(self, "ocr_page"):
+            return
+        toast = self.ocr_page.top_notice_bar
+        toast.adjustSize()
+        margin = max(16, round(20 * self._responsive_ui_scale))
+        x = max(margin, self.width() - toast.width() - margin)
+        y = max(self.header.height() + margin, self.height() - toast.height() - margin)
+        toast.move(x, y)
+        if toast.isVisible():
+            toast.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "ocr_page"):
+            self._apply_responsive_layout()
 
     def open_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -6010,7 +6404,10 @@ class MainWindow(QMainWindow):
         foreground, background = colors.get(state, ("#3B82F6", "#FFFFFF"))
         self.status_frame.setStyleSheet(f"background:{background};border-top:1px solid #E8EAED;")
         self.status_dot.setStyleSheet(f"color:{foreground};")
-        self.status_text.setStyleSheet(f"color:{foreground};font-size:12px;")
+        status_font_size = max(10, round(12 * self._responsive_ui_scale))
+        self.status_text.setStyleSheet(
+            f"color:{foreground};font-size:{status_font_size}px;"
+        )
         self.status_text.setText(text)
 
     def parse_history_record(self, text: str, source_name: str) -> None:
