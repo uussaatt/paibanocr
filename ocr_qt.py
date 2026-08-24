@@ -12,8 +12,10 @@ import os
 import subprocess
 import sys
 import copy
+import ctypes
 import json
 import shutil
+import tempfile
 import zipfile
 import re
 import time
@@ -21,7 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from PySide6.QtCore import (
     Qt, Signal, QSize, QThreadPool, QUrl, QRect, QPoint, QTimer, QItemSelectionModel,
     QPropertyAnimation, QEvent, QObject,
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFileDialog, QFormLayout, QFrame,
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QAbstractItemView,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QRadioButton, QScrollArea,
+    QCheckBox,
     QSizePolicy, QSpinBox, QDoubleSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
     QTextEdit, QVBoxLayout, QWidget, QInputDialog, QComboBox,
     QListWidget, QListWidgetItem, QSplitter, QMenu, QDialogButtonBox, QColorDialog,
@@ -59,6 +62,7 @@ MUTED = "#6F747C"
 SURFACE = "#FFFFFF"
 BACKGROUND = "#F7F8FA"
 BORDER = "#E8EAED"
+GROUP_C_GREEN = "#16A269"
 
 for _font_path in (Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyh.ttf")):
     if _font_path.exists():
@@ -212,6 +216,68 @@ def sidebar_icon(kind: str) -> QIcon:
         painter.end()
         icon.addPixmap(pixmap, mode, state)
     return icon
+
+
+def app_icon() -> QIcon:
+    """Create the visible application icon used by the Windows taskbar."""
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#2F80ED"))
+    painter.drawRoundedRect(QRect(6, 6, 52, 52), 12, 12)
+    painter.setBrush(QColor("#FFFFFF"))
+    painter.drawRoundedRect(QRect(18, 14, 28, 36), 5, 5)
+    painter.setBrush(QColor("#2F80ED"))
+    painter.drawRoundedRect(QRect(23, 23, 18, 4), 2, 2)
+    painter.drawRoundedRect(QRect(23, 32, 18, 4), 2, 2)
+    painter.drawRoundedRect(QRect(23, 41, 12, 4), 2, 2)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _ensure_windows_icon_files() -> tuple[str, str]:
+    icon_dir = Path(tempfile.gettempdir()) / "ocr_qt_icons"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    app_path = icon_dir / "ocr_app.ico"
+    transparent_path = icon_dir / "ocr_transparent.ico"
+    if not app_path.exists():
+        image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((24, 24, 232, 232), radius=48, fill=(47, 128, 237, 255))
+        draw.rounded_rectangle((76, 56, 180, 200), radius=22, fill=(255, 255, 255, 255))
+        draw.rounded_rectangle((96, 92, 160, 108), radius=8, fill=(47, 128, 237, 255))
+        draw.rounded_rectangle((96, 128, 160, 144), radius=8, fill=(47, 128, 237, 255))
+        draw.rounded_rectangle((96, 164, 140, 180), radius=8, fill=(47, 128, 237, 255))
+        image.save(app_path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])
+    if not transparent_path.exists():
+        Image.new("RGBA", (16, 16), (0, 0, 0, 0)).save(transparent_path, sizes=[(16, 16)])
+    return str(app_path), str(transparent_path)
+
+
+def apply_windows_taskbar_icon(window: QWidget) -> None:
+    if sys.platform != "win32":
+        return
+    app_path, transparent_path = _ensure_windows_icon_files()
+    user32 = ctypes.windll.user32
+    load_image = user32.LoadImageW
+    load_image.restype = ctypes.c_void_p
+    image_icon = 1
+    lr_loadfromfile = 0x00000010
+    small_icon = load_image(None, transparent_path, image_icon, 16, 16, lr_loadfromfile)
+    big_icon = load_image(None, app_path, image_icon, 0, 0, lr_loadfromfile)
+    if not small_icon or not big_icon:
+        return
+    hwnd = int(window.winId())
+    wm_seticon = 0x0080
+    icon_small = 0
+    icon_big = 1
+    icon_small2 = 2
+    user32.SendMessageW(hwnd, wm_seticon, icon_small, small_icon)
+    user32.SendMessageW(hwnd, wm_seticon, icon_small2, small_icon)
+    user32.SendMessageW(hwnd, wm_seticon, icon_big, big_icon)
+    window._windows_hicons = (small_icon, big_icon)
 
 
 def section_label(text: str) -> QLabel:
@@ -1764,6 +1830,7 @@ class ClassifierTable(QTableWidget):
 
     rowsReordered = Signal(list, int)
     moveRequested = Signal(int)
+    selectionMoveRequested = Signal(int)
     groupRequested = Signal(str)
 
     def __init__(self, rows: int, columns: int, parent: QWidget | None = None) -> None:
@@ -1779,14 +1846,20 @@ class ClassifierTable(QTableWidget):
     @staticmethod
     def _classification_key(event) -> tuple[str, Any] | None:
         modifiers = event.modifiers()
+        key = event.key()
+        if (
+            modifiers == Qt.KeyboardModifier.ControlModifier
+            and key in {Qt.Key.Key_Up, Qt.Key.Key_Down}
+        ):
+            return "cursor", -1 if key == Qt.Key.Key_Up else 1
         blocked = (
             Qt.KeyboardModifier.ControlModifier
             | Qt.KeyboardModifier.AltModifier
             | Qt.KeyboardModifier.MetaModifier
+            | Qt.KeyboardModifier.ShiftModifier
         )
         if modifiers & blocked:
             return None
-        key = event.key()
         text_value = event.text()
         nk = int(event.nativeVirtualKey())
         ns = int(event.nativeScanCode())
@@ -1809,6 +1882,8 @@ class ClassifierTable(QTableWidget):
             kind, value = action
             if kind == "move":
                 self.moveRequested.emit(int(value))
+            elif kind == "cursor":
+                self.selectionMoveRequested.emit(int(value))
             else:
                 self.groupRequested.emit(str(value))
             event.accept()
@@ -2308,6 +2383,7 @@ class OCRPage(QWidget):
         table.customContextMenuRequested.connect(self.show_table_context_menu)
         table.rowsReordered.connect(self.reorder_rows)
         table.moveRequested.connect(self.move_row)
+        table.selectionMoveRequested.connect(self.move_selection_cursor)
         table.groupRequested.connect(self.set_selected_group)
         table.itemSelectionChanged.connect(self._sync_verification_from_table)
         for sequence, handler in [
@@ -3215,7 +3291,7 @@ class OCRPage(QWidget):
         if label_item is not None and not self._font_style_for_label(
             str(self.rows[row_index].get("label", ""))
         ):
-            label_item.setForeground(QColor("#006600" if group == "C" else "#17191C"))
+            label_item.setForeground(QColor(GROUP_C_GREEN if group == "C" else "#17191C"))
         self.table.blockSignals(False)
         self.table.viewport().update()
         self._update_report()
@@ -3254,7 +3330,7 @@ class OCRPage(QWidget):
                         font.setBold(str(style.get("font_weight", "normal")) == "bold")
                         item.setFont(font)
                     elif str(row.get("group", "")) == "C":
-                        item.setForeground(QColor("#006600"))
+                        item.setForeground(QColor(GROUP_C_GREEN))
                 if column == 4 and low_confidence:
                     item.setText(f"● {confidence:g}")
                     item.setForeground(QColor("#C62828"))
@@ -4059,6 +4135,31 @@ class OCRPage(QWidget):
             return
         self.set_selected_group(group)
 
+    def move_selection_cursor(self, direction: int) -> None:
+        if self.result_stack.currentIndex() != 1:
+            return
+        if self._classifier_cell_editor_has_focus():
+            return
+        row_count = self.table.rowCount()
+        if row_count <= 0:
+            return
+        selected = self._selected_rows()
+        if selected:
+            current = selected[0] if direction < 0 else selected[-1]
+        else:
+            current = self.table.currentRow()
+        if current < 0:
+            target = 0
+        else:
+            target = max(0, min(row_count - 1, current + direction))
+        self._selection_anchor_row = target
+        self._select_rows([target])
+        self.table.setCurrentCell(target, 0)
+        item = self.table.item(target, 0)
+        if item is not None:
+            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+        self._sync_verification_from_table()
+
     def add_row(self) -> None:
         selected = self._selected_rows()
         reference = self.rows[selected[-1]] if selected else {}
@@ -4206,7 +4307,7 @@ class OCRPage(QWidget):
                 group_widget.blockSignals(False)
             label_item = self.table.item(index, 0)
             if label_item is not None and not self._font_style_for_label(str(self.rows[index].get("label", ""))):
-                label_item.setForeground(QColor("#006600" if group == "C" else "#17191C"))
+                label_item.setForeground(QColor(GROUP_C_GREEN if group == "C" else "#17191C"))
         self.table.blockSignals(False)
         self.table.viewport().update()
         self._select_rows(indices)
@@ -4342,7 +4443,7 @@ class OCRPage(QWidget):
         book_name = self.book_name.text().strip() or "未命名书籍"
         safe_book_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", book_name).rstrip(". ")
         safe_book_name = safe_book_name or "未命名书籍"
-        return f"{safe_book_name}{self.book_page.value()}{suffix}"
+        return f"{safe_book_name}{self.book_page.value() - 1}{suffix}"
 
     def _direct_export_path(self, filename: str) -> Path | None:
         configured = str(self.repository.get("export_save_path", "") or "").strip()
@@ -4903,6 +5004,8 @@ class HistoryPage(QWidget):
         self.table.setHorizontalHeaderLabels(["时间", "类型", "书名", "页码", "文件", "行数"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.doubleClicked.connect(self.show_detail)
         layout.addWidget(self.table)
         self.all_items: list[dict[str, Any]] = []
@@ -6452,7 +6555,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.repository = repository
         self.setWindowTitle("设置")
-        self.resize(720, 560)
+        self.resize(720, 700)
         layout = QVBoxLayout(self)
         layout.addWidget(section_label("应用设置"))
         form = QFormLayout()
@@ -6479,6 +6582,36 @@ class SettingsDialog(QDialog):
         form.addRow("拼接图片目录", merge_row)
         form.addRow("导出文件目录", export_row)
         layout.addLayout(form)
+        layout.addWidget(section_label("每日识别限制"))
+        limit_form = QFormLayout()
+        self.daily_limit_enabled: dict[str, QCheckBox] = {}
+        self.daily_limit_count: dict[str, QSpinBox] = {}
+        self.daily_limit_status: dict[str, QLabel] = {}
+        for mode in ("accurate", "general"):
+            daily_limit = repository.daily_ocr_limit_config(mode)
+            enabled = QCheckBox("启用")
+            enabled.setChecked(bool(daily_limit.get("enabled", False)))
+            count = QSpinBox()
+            count.setRange(1, 100000)
+            try:
+                count.setValue(max(1, int(daily_limit.get("max_count", 10))))
+            except (TypeError, ValueError):
+                count.setValue(10)
+            enabled.setEnabled(False)
+            count.setEnabled(False)
+            self.daily_limit_enabled[mode] = enabled
+            self.daily_limit_count[mode] = count
+            limit_form.addRow(f"{MODE_NAMES[mode]}识别开关", enabled)
+            limit_form.addRow(f"{MODE_NAMES[mode]}每日最多接口调用", count)
+            status = muted_label("")
+            self.daily_limit_status[mode] = status
+            limit_form.addRow("今日剩余", status)
+        unlock_limit = QPushButton("解锁修改")
+        unlock_limit.clicked.connect(self.unlock_daily_limit)
+        limit_form.addRow("", unlock_limit)
+        layout.addLayout(limit_form)
+        layout.addWidget(muted_label("快速识别不受限制；修改高精度或通用的每日限额、开关前需输入管理员密码。当天次数会在次日自动归零。", True))
+        self.refresh_daily_limit_status()
         layout.addWidget(section_label("数据维护"))
         maintenance = QGridLayout()
         data_info = QPushButton("数据文件信息")
@@ -6508,7 +6641,49 @@ class SettingsDialog(QDialog):
         self.repository.set("gallery_ocr_limit", self.gallery_limit.value())
         self.repository.set("merge_save_path", self.merge_path.text().strip())
         self.repository.set("export_save_path", self.export_path.text().strip())
+        if getattr(self, "daily_limit_unlocked", False):
+            limits = self.repository.get("daily_ocr_limits", {}) or {}
+            limits = dict(limits) if isinstance(limits, dict) else {}
+            for mode in ("accurate", "general"):
+                previous = self.repository.daily_ocr_limit_config(mode)
+                limits[mode] = {
+                    "enabled": self.daily_limit_enabled[mode].isChecked(),
+                    "max_count": self.daily_limit_count[mode].value(),
+                    "date": str(previous.get("date", "")),
+                    "used": previous.get("used", 0),
+                }
+            self.repository.set("daily_ocr_limits", limits)
+            status_lines = []
+            for mode in ("accurate", "general"):
+                if self.daily_limit_enabled[mode].isChecked():
+                    status_lines.append(
+                        f"{MODE_NAMES[mode]}识别：已启用，每日最多 {self.daily_limit_count[mode].value()} 次接口调用"
+                    )
+                else:
+                    status_lines.append(f"{MODE_NAMES[mode]}识别：未启用")
+            QMessageBox.information(self, "每日识别限制已保存", "\n".join(status_lines))
         super().accept()
+
+    def refresh_daily_limit_status(self) -> None:
+        for mode in ("accurate", "general"):
+            allowed, used, max_count = self.repository.daily_ocr_limit_status(mode)
+            config = self.repository.daily_ocr_limit_config(mode)
+            if not config.get("enabled", False):
+                text = "未启用，不限额"
+            else:
+                remaining = max(0, max_count - used)
+                text = f"已用 {used}/{max_count}，剩余 {remaining} 次"
+            self.daily_limit_status[mode].setText(text)
+
+    def unlock_daily_limit(self) -> None:
+        if not self._verify_password():
+            QMessageBox.warning(self, "验证失败", "密码错误或操作已取消")
+            return
+        self.daily_limit_unlocked = True
+        for mode in ("accurate", "general"):
+            self.daily_limit_enabled[mode].setEnabled(True)
+            self.daily_limit_count[mode].setEnabled(True)
+        self.daily_limit_count["accurate"].setFocus()
 
     def choose_dir(self, target: QLineEdit) -> None:
         directory = QFileDialog.getExistingDirectory(self, "选择目录", target.text() or str(APP_DIR))
@@ -6931,12 +7106,16 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("local.ocr.classifier")
     app = QApplication(sys.argv)
-    app.setApplicationName("")
+    app.setApplicationName("OCR")
+    app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     window = MainWindow()
     window.show()
+    apply_windows_taskbar_icon(window)
     return app.exec()
 
 

@@ -385,6 +385,58 @@ class Repository:
     def reload(self) -> None:
         self.store.load()
 
+    def daily_ocr_limit_config(self, mode: str) -> dict[str, Any]:
+        """Return the saved limit configuration for a restricted OCR mode."""
+        if mode not in {"accurate", "general"}:
+            return {"enabled": False, "max_count": 0, "date": "", "used": 0}
+        limits = self.get("daily_ocr_limits", {}) or {}
+        raw = limits.get(mode, {}) if isinstance(limits, dict) else {}
+        # Read the previous single-limit setting when upgrading existing data.
+        if not isinstance(raw, dict) or not raw:
+            raw = self.get("daily_ocr_limit", {}) or {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def daily_ocr_limit_status(self, mode: str) -> tuple[bool, int, int]:
+        """Return whether the selected OCR mode allows another batch today."""
+        if mode not in {"accurate", "general"}:
+            return True, 0, 0
+        raw = self.daily_ocr_limit_config(mode)
+        enabled = bool(raw.get("enabled", False))
+        try:
+            max_count = max(1, int(raw.get("max_count", 10)))
+            used = max(0, int(raw.get("used", 0)))
+        except (TypeError, ValueError):
+            max_count, used = 10, 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        if str(raw.get("date", "")) != today:
+            used = 0
+        return (not enabled or used < max_count), used, max_count
+
+    def consume_daily_ocr_limit(self, mode: str) -> tuple[bool, int, int]:
+        """Reserve one batch for the selected restricted OCR mode."""
+        if mode not in {"accurate", "general"}:
+            return True, 0, 0
+        raw = self.daily_ocr_limit_config(mode)
+        enabled = bool(raw.get("enabled", False))
+        try:
+            max_count = max(1, int(raw.get("max_count", 10)))
+            used = max(0, int(raw.get("used", 0)))
+        except (TypeError, ValueError):
+            max_count, used = 10, 0
+        today = datetime.now().strftime("%Y-%m-%d")
+        if str(raw.get("date", "")) != today:
+            used = 0
+        if enabled and used >= max_count:
+            return False, used, max_count
+        if enabled:
+            raw.update({"enabled": True, "max_count": max_count, "date": today, "used": used + 1})
+            limits = self.get("daily_ocr_limits", {}) or {}
+            limits = dict(limits) if isinstance(limits, dict) else {}
+            limits[mode] = raw
+            self.set("daily_ocr_limits", limits)
+            used += 1
+        return True, used, max_count
+
     def limits(self) -> dict[str, int]:
         result = dict(self.DEFAULT_LIMITS)
         result.update(self.get("size_limits", {}) or {})
@@ -582,6 +634,17 @@ class OCRWorker(QRunnable):
                 digest, cached = self.repository.cached(path, self.mode)
                 if cached:
                     results.append(cached)
+                    continue
+                permitted, used, max_count = self.repository.consume_daily_ocr_limit(self.mode)
+                if not permitted:
+                    results.append({
+                        "file": os.path.basename(path), "path": path, "lines": [],
+                        "count": 0, "skipped": True,
+                        "reason": (
+                            f"今日{MODE_NAMES[self.mode]}接口调用次数已达上限"
+                            f"（{used}/{max_count}）"
+                        ),
+                    })
                     continue
                 payload = api_call(path)
                 if "words_result" not in payload:
