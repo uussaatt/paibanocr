@@ -4737,7 +4737,8 @@ class OCRPage(QWidget):
         """分组格式：辈分 | t1(A组) | t2(C组) | t3(B组) | d(D组)
         
         每遇到一个A组就新建一行，同一行的C、B、D组填入对应列
-        辈分使用软件中的分类值，D组多个内容用|分隔
+        辈分使用软件中的分类值；各组内容保持文本报告中的原始文本和换行。
+        因此 D 组名称中已有的 | 会原样导出，导出过程不会自行添加 |。
         """
         path = self._direct_export_path(self._report_export_filename("_分组格式.xlsx"))
         if path is None:
@@ -4786,9 +4787,9 @@ class OCRPage(QWidget):
                     else:
                         current_row["t3(B组)"] = name
                 elif group == "D":
-                    # D组追加到d列（用|分隔，不换行）
+                    # 保留文本报告中的行分隔及名称中的 |，不在导出阶段生成 |。
                     if current_row["d(D组)"]:
-                        current_row["d(D组)"] += "|" + name
+                        current_row["d(D组)"] += "\n" + name
                     else:
                         current_row["d(D组)"] = name
             
