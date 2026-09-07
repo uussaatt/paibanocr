@@ -30,7 +30,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QPainter, QPen, QPixmap, QIcon, QImageReader,
-    QKeySequence, QShortcut, QTextCursor,
+    QKeySequence, QShortcut, QTextCursor, QCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFileDialog, QFormLayout, QFrame,
@@ -63,6 +63,14 @@ SURFACE = "#FFFFFF"
 BACKGROUND = "#F7F8FA"
 BORDER = "#E8EAED"
 GROUP_C_GREEN = "#16A269"
+EXCEL_EXPORT_FORMAT_NAMES = {
+    "standard": "标准格式（分类 | 名称 | 组值）",
+    "grouped": "分组格式（辈分 | A组 | C组 | B组 | D组）",
+}
+EXCEL_EXPORT_FORMAT_SHORT_NAMES = {
+    "standard": "标准格式",
+    "grouped": "分组格式",
+}
 
 for _font_path in (Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyh.ttf")):
     if _font_path.exists():
@@ -4559,11 +4567,54 @@ class OCRPage(QWidget):
                 })
         return merged_entries
 
-    def export_report_excel(self) -> None:
+    def show_excel_export_menu(self) -> None:
+        """显示Excel导出格式选择菜单"""
+        menu = QMenu(self)
+
+        default_format = self._default_excel_export_format()
+        default_action = menu.addAction(
+            f"按默认格式导出：{EXCEL_EXPORT_FORMAT_SHORT_NAMES[default_format]}"
+        )
+        default_action.triggered.connect(lambda: self.export_report_excel())
+        menu.addSeparator()
+
+        action1 = menu.addAction(EXCEL_EXPORT_FORMAT_NAMES["standard"])
+        action1.triggered.connect(lambda: self.export_report_excel("standard"))
+
+        action2 = menu.addAction(EXCEL_EXPORT_FORMAT_NAMES["grouped"])
+        action2.triggered.connect(lambda: self.export_report_excel("grouped"))
+
+        # 在按钮下方显示菜单
+        button = self.sender()
+        if isinstance(button, QPushButton):
+            menu.exec(button.mapToGlobal(QPoint(0, button.height())))
+        else:
+            menu.exec(QCursor.pos())
+
+    def _default_excel_export_format(self) -> str:
+        configured = str(self.repository.get("excel_export_format", "grouped") or "grouped")
+        return configured if configured in EXCEL_EXPORT_FORMAT_NAMES else "grouped"
+
+    def export_report_excel(self, export_format: str | None = None) -> None:
+        """导出Excel，支持多种格式
+
+        Args:
+            export_format: "standard" 或 "grouped"；省略时使用设置中的默认格式
+        """
+        if export_format not in EXCEL_EXPORT_FORMAT_NAMES:
+            export_format = self._default_excel_export_format()
         entries = self._parse_report_entries()
         if not entries:
             QMessageBox.warning(self, "无法导出", "当前报告中没有可导出的条目。")
             return
+        
+        if export_format == "grouped":
+            self._export_excel_grouped_format(entries)
+        else:
+            self._export_excel_standard_format(entries)
+
+    def _export_excel_standard_format(self, entries: list[dict[str, Any]]) -> None:
+        """标准格式：分类 | 名称 | 组值"""
         issues = []
         for index, entry in enumerate(entries, start=1):
             style = self._font_style_for_label(entry["name"]) or {}
@@ -4609,9 +4660,129 @@ class OCRPage(QWidget):
                     sheet.row_dimensions[row_number].height = max(20, line_count * 18)
             self.repository.save_export_record(str(path), self.report.toPlainText())
             self.statusChanged.emit(
-                "done", f"报告 Excel 已导出 · {len(entries)} 条合并为 {len(merged_entries)} 组"
+                "done", f"报告 Excel 已导出（标准格式） · {len(entries)} 条合并为 {len(merged_entries)} 组"
             )
             self._show_file_toast(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    def _export_excel_grouped_format(self, entries: list[dict[str, Any]]) -> None:
+        """分组格式：辈分 | t1(A组) | t2(C组) | t3(B组) | d(D组)
+        
+        每遇到一个A组就新建一行，同一行的C、B、D组填入对应列
+        辈分使用软件中的分类值，D组多个内容用|分隔
+        """
+        path = self._direct_export_path(self._report_export_filename("_分组格式.xlsx"))
+        if path is None:
+            return
+        
+        try:
+            import pandas as pd
+            from openpyxl.styles import Alignment, Font, Border, Side
+            
+            # 按A组分组构建数据
+            grouped_rows: list[dict[str, Any]] = []
+            current_row: dict[str, Any] = {
+                "辈分": "", "t1(A组)": "", "t2(C组)": "", "t3(B组)": "", "d(D组)": ""
+            }
+            
+            for entry in entries:
+                group = entry.get("group", "")
+                name = entry.get("name", "")
+                category = str(entry.get("category", ""))
+                
+                if group == "A":
+                    # 已有 A 组时才结束上一行；首个 A 组应接管临时记录，
+                    # 避免此前出现的 D/C/B 组被导出为“辈分”为空的独立行。
+                    if current_row["t1(A组)"]:
+                        grouped_rows.append(current_row.copy())
+
+                        current_row = {
+                            "辈分": "",
+                            "t1(A组)": "",
+                            "t2(C组)": "",
+                            "t3(B组)": "",
+                            "d(D组)": ""
+                        }
+                    current_row["辈分"] = category  # 使用软件中的分类值作为辈分
+                    current_row["t1(A组)"] = name
+                elif group == "C":
+                    # C组追加到t2列（换行连接）
+                    if current_row["t2(C组)"]:
+                        current_row["t2(C组)"] += "\n" + name
+                    else:
+                        current_row["t2(C组)"] = name
+                elif group == "B":
+                    # B组追加到t3列（换行连接）
+                    if current_row["t3(B组)"]:
+                        current_row["t3(B组)"] += "\n" + name
+                    else:
+                        current_row["t3(B组)"] = name
+                elif group == "D":
+                    # D组追加到d列（用|分隔，不换行）
+                    if current_row["d(D组)"]:
+                        current_row["d(D组)"] += "|" + name
+                    else:
+                        current_row["d(D组)"] = name
+            
+            # 保存最后一行
+            if current_row["t1(A组)"] or current_row["t2(C组)"] or current_row["t3(B组)"] or current_row["d(D组)"]:
+                grouped_rows.append(current_row.copy())
+            
+            if not grouped_rows:
+                QMessageBox.warning(self, "导出失败", "没有可导出的数据（至少需要一个A组记录）")
+                return
+            
+            # 创建DataFrame
+            frame = pd.DataFrame(grouped_rows)
+            
+            # 写入Excel
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                frame.to_excel(writer, index=False)
+                sheet = writer.sheets["Sheet1"]
+                
+                # 设置样式
+                thin_border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+                
+                # 表头样式
+                for cell in sheet[1]:
+                    cell.font = Font(bold=True, size=11)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = thin_border
+                
+                # 数据单元格样式和边框
+                for row_cells in sheet.iter_rows(min_row=2):
+                    for cell in row_cells:
+                        cell.alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
+                        cell.border = thin_border
+                
+                # 设置列宽
+                sheet.column_dimensions["A"].width = 6   # 革分
+                sheet.column_dimensions["B"].width = 20  # t1(A组)
+                sheet.column_dimensions["C"].width = 30  # t2(C组)
+                sheet.column_dimensions["D"].width = 30  # t3(B组)
+                sheet.column_dimensions["E"].width = 30  # d(D组)
+                
+                # 动态设置行高
+                for row_number in range(2, len(grouped_rows) + 2):
+                    max_lines = 1
+                    for col in ["B", "C", "D", "E"]:
+                        cell_value = str(sheet[f"{col}{row_number}"].value or "")
+                        lines = max(1, cell_value.count("\n") + 1)
+                        max_lines = max(max_lines, lines)
+                    sheet.row_dimensions[row_number].height = max(20, max_lines * 18)
+            
+            self.repository.save_export_record(str(path), self.report.toPlainText())
+            self.statusChanged.emit(
+                "done", f"报告 Excel 已导出（分组格式） · {len(entries)} 条 → {len(grouped_rows)} 行"
+            )
+            self._show_file_toast(path)
+            
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
@@ -4745,7 +4916,8 @@ class HomeMonthlyChart(FigureCanvasQTAgg):
     def render(self, stats: dict[str, Any], month: str) -> None:
         self.axes.clear()
         today = datetime.now()
-        day_count = today.day if month == today.strftime("%Y-%m") else 31
+        # 当前月月初也保留 15 天的横轴空间，15 日后随日期逐日增加。
+        day_count = max(15, today.day) if month == today.strftime("%Y-%m") else 31
         self.rows = []
         for day_number in range(1, day_count + 1):
             date_key = f"{month}-{day_number:02d}"
@@ -6601,6 +6773,15 @@ class SettingsDialog(QDialog):
         export_row.addWidget(export_browse)
         form.addRow("拼接图片目录", merge_row)
         form.addRow("导出文件目录", export_row)
+        self.excel_export_format = QComboBox()
+        for format_key, format_name in EXCEL_EXPORT_FORMAT_NAMES.items():
+            self.excel_export_format.addItem(format_name, format_key)
+        current_excel_format = str(repository.get("excel_export_format", "grouped") or "grouped")
+        current_index = self.excel_export_format.findData(current_excel_format)
+        self.excel_export_format.setCurrentIndex(
+            current_index if current_index >= 0 else self.excel_export_format.findData("grouped")
+        )
+        form.addRow("Excel默认导出格式", self.excel_export_format)
         layout.addLayout(form)
         layout.addWidget(section_label("每日识别限制"))
         limit_form = QFormLayout()
@@ -6661,6 +6842,9 @@ class SettingsDialog(QDialog):
         self.repository.set("gallery_ocr_limit", self.gallery_limit.value())
         self.repository.set("merge_save_path", self.merge_path.text().strip())
         self.repository.set("export_save_path", self.export_path.text().strip())
+        self.repository.set(
+            "excel_export_format", str(self.excel_export_format.currentData() or "grouped")
+        )
         if getattr(self, "daily_limit_unlocked", False):
             limits = self.repository.get("daily_ocr_limits", {}) or {}
             limits = dict(limits) if isinstance(limits, dict) else {}
