@@ -412,8 +412,16 @@ class Repository:
             used = 0
         return (not enabled or used < max_count), used, max_count
 
-    def consume_daily_ocr_limit(self, mode: str) -> tuple[bool, int, int]:
-        """Reserve one batch for the selected restricted OCR mode."""
+    def consume_daily_ocr_limit(self, mode: str, increment: bool = True) -> tuple[bool, int, int]:
+        """Reserve one batch for the selected restricted OCR mode.
+        
+        Args:
+            mode: OCR mode ('accurate' or 'general')
+            increment: If True, actually consume one quota; if False, only check
+        
+        Returns:
+            (allowed, used_count, max_count)
+        """
         if mode not in {"accurate", "general"}:
             return True, 0, 0
         raw = self.daily_ocr_limit_config(mode)
@@ -428,7 +436,7 @@ class Repository:
             used = 0
         if enabled and used >= max_count:
             return False, used, max_count
-        if enabled:
+        if enabled and increment:
             raw.update({"enabled": True, "max_count": max_count, "date": today, "used": used + 1})
             limits = self.get("daily_ocr_limits", {}) or {}
             limits = dict(limits) if isinstance(limits, dict) else {}
@@ -635,7 +643,8 @@ class OCRWorker(QRunnable):
                 if cached:
                     results.append(cached)
                     continue
-                permitted, used, max_count = self.repository.consume_daily_ocr_limit(self.mode)
+                # 先检查限额（不实际扣减）
+                permitted, used, max_count = self.repository.consume_daily_ocr_limit(self.mode, increment=False)
                 if not permitted:
                     results.append({
                         "file": os.path.basename(path), "path": path, "lines": [],
@@ -648,11 +657,14 @@ class OCRWorker(QRunnable):
                     continue
                 payload = api_call(path)
                 if "words_result" not in payload:
+                    # 识别失败，不扣减限额
                     results.append({
                         "file": os.path.basename(path), "path": path, "lines": [],
                         "count": 0, "error": payload.get("error_msg", str(payload)),
                     })
                     continue
+                # 识别成功，才实际扣减限额
+                self.repository.consume_daily_ocr_limit(self.mode, increment=True)
                 lines = format_words_result(payload)
                 boxes = extract_word_boxes(payload)
                 record = {

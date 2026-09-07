@@ -4527,14 +4527,25 @@ class OCRPage(QWidget):
     def _merge_adjacent_report_entries(
         entries: list[dict[str, Any]],
     ) -> list[dict[str, str]]:
-        """Merge only consecutive entries with the same category and group."""
+        """Merge only consecutive entries with the same category and group.
+        
+        Exception: Group A entries are never merged - each A entry stays in its own row.
+        """
         merged_entries: list[dict[str, str]] = []
         for entry in entries:
             category = str(entry.get("category", ""))
             name = str(entry.get("name", ""))
             group = str(entry.get("group", ""))
             blank_lines = max(0, int(entry.get("blank_lines_before", 0) or 0))
-            if (
+            
+            # A组记录永远不合并，每条独占一行
+            if group == "A":
+                merged_entries.append({
+                    "category": category,
+                    "name": name,
+                    "group": group,
+                })
+            elif (
                 merged_entries
                 and merged_entries[-1]["category"] == category
                 and merged_entries[-1]["group"] == group
@@ -4873,8 +4884,8 @@ class HomePage(QWidget):
         layout.addWidget(muted_label("接口调用不包含缓存复用；缓存复用按高精度与通用分别统计。"))
 
         cards = QGridLayout()
-        cards.setHorizontalSpacing(12)
-        cards.setVerticalSpacing(12)
+        cards.setHorizontalSpacing(10)
+        cards.setVerticalSpacing(10)
         self.stat_values: dict[str, QLabel] = {}
         definitions = [
             ("today_accurate", "今日高精度调用"),
@@ -4885,8 +4896,10 @@ class HomePage(QWidget):
             ("month_general", "本月通用调用"),
             ("month_accurate_cache", "本月高精度缓存"),
             ("month_general_cache", "本月通用缓存"),
+            ("remaining_accurate", "今日高精度剩余"),
+            ("remaining_general", "今日通用剩余"),
         ]
-        for column in range(4):
+        for column in range(5):
             cards.setColumnStretch(column, 1)
         for index, (key, heading) in enumerate(definitions):
             frame = QFrame()
@@ -4894,12 +4907,12 @@ class HomePage(QWidget):
                 "QFrame { background:#FFFFFF; border:1px solid #E5E7EB; "
                 "border-radius:12px; }"
             )
-            frame.setMinimumHeight(78)
-            frame.setMaximumHeight(86)
+            frame.setMinimumHeight(68)
+            frame.setMaximumHeight(76)
             add_shadow(frame, blur=18, opacity=16)
             box = QVBoxLayout(frame)
-            box.setContentsMargins(14, 9, 14, 9)
-            box.setSpacing(3)
+            box.setContentsMargins(12, 7, 12, 7)
+            box.setSpacing(2)
             heading_label = QLabel(heading)
             heading_label.setStyleSheet("color:#667085;font-size:12px;border:0;")
             value = QLabel("0")
@@ -4909,7 +4922,7 @@ class HomePage(QWidget):
             box.addWidget(heading_label)
             box.addWidget(value)
             self.stat_values[key] = value
-            cards.addWidget(frame, index // 4, index % 4)
+            cards.addWidget(frame, index // 5, index % 5)
         layout.addLayout(cards)
 
         chart_card = card()
@@ -4962,6 +4975,13 @@ class HomePage(QWidget):
             "month_accurate_cache": month_accurate_cache,
             "month_general_cache": month_general_cache,
         }
+        for mode, key in (("accurate", "remaining_accurate"), ("general", "remaining_general")):
+            config = self.repository.daily_ocr_limit_config(mode)
+            if not config.get("enabled", False):
+                values[key] = "不限额"
+            else:
+                _allowed, used, max_count = self.repository.daily_ocr_limit_status(mode)
+                values[key] = f"{max(0, max_count - used)} 次"
         for key, value in values.items():
             self.stat_values[key].setText(str(value))
         self.monthly_chart.render(stats, month)
@@ -7089,6 +7109,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         SettingsDialog(self.repository, self).exec()
+        self.home_page.refresh()
 
     def show_help(self) -> None:
         QMessageBox.information(
