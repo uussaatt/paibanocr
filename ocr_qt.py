@@ -3305,52 +3305,119 @@ class OCRPage(QWidget):
         self._update_report()
         self.statusChanged.emit("done", f"第 {row_index + 1} 行已设置为 {group} 组")
 
+    def _table_row_token(self, row_index: int) -> int | None:
+        item = self.table.item(row_index, 0)
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return int(value) if value is not None else None
+
+    def _table_order_matches_rows(self) -> bool:
+        if self.table.rowCount() != len(self.rows):
+            return False
+        return all(self._table_row_token(index) == id(row) for index, row in enumerate(self.rows))
+
+    def _update_table_row(self, row_index: int, row: dict[str, Any], create: bool = False) -> None:
+        values = [
+            row["label"], row["y"], row["x"], row["height"], row["confidence"],
+            row["group"], row.get("category", "未分类"),
+        ]
+        category_color = QColor(self.category_colors.get(str(row.get("category", "未分类")), ""))
+        background = QColor("#FFF3B0") if row.get("marked", False) else (
+            category_color.lighter(180) if category_color.isValid() else QColor()
+        )
+        confidence = float(row.get("confidence", 0) or 0)
+        confidence_threshold = float(self.repository.get("conf_threshold", 0) or 0)
+        low_confidence = confidence > 0 and confidence_threshold > 0 and confidence < confidence_threshold
+        for column, value in enumerate(values):
+            item = self.table.item(row_index, column)
+            if create or item is None:
+                item = QTableWidgetItem()
+                self.table.setItem(row_index, column, item)
+            item.setData(Qt.ItemDataRole.UserRole, id(row) if column == 0 else None)
+            item.setText(str(value))
+            item.setBackground(QBrush(QColor("#FFF4C2")) if low_confidence else (
+                QBrush(background) if background.isValid() else QBrush()
+            ))
+            if column == 0:
+                style = self._font_style_for_label(str(row.get("label", "")))
+                if style:
+                    item.setForeground(QColor(str(style.get("color", "#17191C"))))
+                    font = QFont(
+                        str(style.get("font_family", "Microsoft YaHei UI")),
+                        int(style.get("font_size", 11) or 11),
+                    )
+                    font.setBold(str(style.get("font_weight", "normal")) == "bold")
+                    item.setFont(font)
+                elif str(row.get("group", "")) == "C":
+                    item.setForeground(QColor(GROUP_C_GREEN))
+                else:
+                    item.setForeground(QColor("#17191C"))
+            if column == 4:
+                item.setText(f"● {confidence:g}" if low_confidence else str(value))
+                if low_confidence:
+                    item.setForeground(QColor("#C62828"))
+            if column == 6:
+                item.setToolTip(str(row.get("category_key", "数据区")))
+            if column == 5:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        group_widget = self.table.cellWidget(row_index, 5)
+        if not isinstance(group_widget, GroupCellButton) or create:
+            self.table.setCellWidget(
+                row_index, 5,
+                self._create_group_button(row_index, str(row.get("group", "B"))),
+            )
+        else:
+            group_widget._row = row_index
+            group_widget.blockSignals(True)
+            group_widget.setCurrentText(str(row.get("group", "B")))
+            group_widget.blockSignals(False)
+
+    def _refresh_table_after_row_change(self) -> None:
+        """Apply row insertions/removals without rebuilding every table widget."""
+        old_ids = [self._table_row_token(index) for index in range(self.table.rowCount())]
+        new_ids = [id(row) for row in self.rows]
+        old_set = {value for value in old_ids if value is not None}
+        new_set = set(new_ids)
+        # A category recalculation may reorder the whole table; retain the
+        # existing full-refresh path for that less common case.
+        old_common = [value for value in old_ids if value in new_set]
+        new_common = [value for value in new_ids if value in old_set]
+        if old_common != new_common:
+            self._populate_results(redraw_plot=False)
+            return
+
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        current_ids = list(old_ids)
+        for row_index in range(len(current_ids) - 1, -1, -1):
+            if current_ids[row_index] not in new_set:
+                self.table.removeRow(row_index)
+                current_ids.pop(row_index)
+        for row_index, row in enumerate(self.rows):
+            row_id = id(row)
+            if row_index < len(current_ids) and current_ids[row_index] == row_id:
+                self._update_table_row(row_index, row)
+                continue
+            if row_id in current_ids:
+                self.table.blockSignals(False)
+                self.table.setUpdatesEnabled(True)
+                self._populate_results(redraw_plot=False)
+                return
+            self.table.insertRow(row_index)
+            current_ids.insert(row_index, row_id)
+            self._update_table_row(row_index, row, create=True)
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
+        self._update_report()
+
     def _populate_results(self, redraw_plot: bool = True) -> None:
         self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.rows))
         for row_index, row in enumerate(self.rows):
-            values = [
-                row["label"], row["y"], row["x"], row["height"], row["confidence"],
-                row["group"], row.get("category", "未分类"),
-            ]
-            category_color = QColor(self.category_colors.get(str(row.get("category", "未分类")), ""))
-            background = QColor("#FFF3B0") if row.get("marked", False) else (
-                category_color.lighter(180) if category_color.isValid() else QColor()
-            )
-            confidence = float(row.get("confidence", 0) or 0)
-            confidence_threshold = float(self.repository.get("conf_threshold", 0) or 0)
-            low_confidence = confidence > 0 and confidence_threshold > 0 and confidence < confidence_threshold
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if low_confidence:
-                    item.setBackground(QColor("#FFF4C2"))
-                elif background.isValid():
-                    item.setBackground(background)
-                if column == 0:
-                    style = self._font_style_for_label(str(row.get("label", "")))
-                    if style:
-                        item.setForeground(QColor(str(style.get("color", "#17191C"))))
-                        font = QFont(
-                            str(style.get("font_family", "Microsoft YaHei UI")),
-                            int(style.get("font_size", 11) or 11),
-                        )
-                        font.setBold(str(style.get("font_weight", "normal")) == "bold")
-                        item.setFont(font)
-                    elif str(row.get("group", "")) == "C":
-                        item.setForeground(QColor(GROUP_C_GREEN))
-                if column == 4 and low_confidence:
-                    item.setText(f"● {confidence:g}")
-                    item.setForeground(QColor("#C62828"))
-                if column == 6:
-                    item.setToolTip(str(row.get("category_key", "数据区")))
-                if column == 5:
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(row_index, column, item)
-            self.table.setCellWidget(
-                row_index, 5,
-                self._create_group_button(row_index, str(row.get("group", "B"))),
-            )
+            self._update_table_row(row_index, row, create=True)
         self.table.blockSignals(False)
         self.table.setUpdatesEnabled(True)
         self.table.viewport().update()
@@ -4195,7 +4262,7 @@ class OCRPage(QWidget):
         else:
             insert_at = selected[-1] + 1
         self.rows.insert(insert_at, new_row)
-        self._populate_results(redraw_plot=False)
+        self._refresh_table_after_row_change()
         self._select_rows([insert_at])
 
     def delete_rows(self) -> None:
@@ -4208,7 +4275,7 @@ class OCRPage(QWidget):
         for index in reversed(indices):
             self.rows.pop(index)
         self._apply_classification_rules()
-        self._populate_results(redraw_plot=False)
+        self._refresh_table_after_row_change()
 
     def _swap_table_rows(self, first_row: int, second_row: int) -> None:
         first_items = [self.table.takeItem(first_row, column) for column in range(self.table.columnCount())]
@@ -4288,7 +4355,7 @@ class OCRPage(QWidget):
             self.rows.pop(index)
         self.rows.insert(indices[0], merged)
         self._apply_classification_rules()
-        self._populate_results(redraw_plot=False)
+        self._refresh_table_after_row_change()
         self._select_rows([indices[0]])
 
     def set_selected_group(self, group: str) -> None:
@@ -4406,7 +4473,7 @@ class OCRPage(QWidget):
             else:
                 output.append(row)
         self.rows = output
-        self._populate_results(redraw_plot=False)
+        self._refresh_table_after_row_change()
         QMessageBox.information(self, "拆分完成", f"已拆分 {targets} 个 A 组项目")
 
     def batch_cleanup(self) -> None:
