@@ -3373,7 +3373,7 @@ class OCRPage(QWidget):
             group_widget.setCurrentText(str(row.get("group", "B")))
             group_widget.blockSignals(False)
 
-    def _refresh_table_after_row_change(self) -> None:
+    def _refresh_table_after_row_change(self, changed_row_ids: set[int] | None = None) -> None:
         """Apply row insertions/removals without rebuilding every table widget."""
         old_ids = [self._table_row_token(index) for index in range(self.table.rowCount())]
         new_ids = [id(row) for row in self.rows]
@@ -3397,7 +3397,8 @@ class OCRPage(QWidget):
         for row_index, row in enumerate(self.rows):
             row_id = id(row)
             if row_index < len(current_ids) and current_ids[row_index] == row_id:
-                self._update_table_row(row_index, row)
+                if changed_row_ids is None or row_id in changed_row_ids:
+                    self._update_table_row(row_index, row)
                 continue
             if row_id in current_ids:
                 self.table.blockSignals(False)
@@ -4488,6 +4489,11 @@ class OCRPage(QWidget):
             raw = str(preset.get("custom_chars", "")) if isinstance(preset, dict) else ""
             tokens.extend(value for value in re.split(r"[|,\s，]+", raw) if len(value.strip()) == 2)
         changed = 0
+        changed_row_ids: set[int] = set()
+        previous_classifications = {
+            id(row): (str(row.get("category", "")), str(row.get("category_key", "")))
+            for row in self.rows
+        }
         output = []
         for row in self.rows:
             original = str(row.get("label", ""))
@@ -4504,14 +4510,22 @@ class OCRPage(QWidget):
                 label = re.sub(r"\s+", " ", label).strip()
             if label != original:
                 changed += 1
+                changed_row_ids.add(id(row))
             if label:
                 row["label"] = label
                 row["group"] = self._group_for_label(label) if row.get("group") not in {"C", "D"} else row["group"]
                 output.append(row)
         removed = len(self.rows) - len(output)
         self.rows = output
-        self._apply_classification_rules()
-        self._populate_results(redraw_plot=False)
+        # Cleanup does not move coordinates, so retain the existing row order.
+        # This lets the table keep its cell widgets instead of recreating them.
+        self._apply_classification_rules(reorder=False)
+        for row in self.rows:
+            if previous_classifications.get(id(row)) != (
+                str(row.get("category", "")), str(row.get("category_key", ""))
+            ):
+                changed_row_ids.add(id(row))
+        self._refresh_table_after_row_change(changed_row_ids)
         QMessageBox.information(self, "批量整理完成", f"已修改 {changed} 条，移除空白项 {removed} 条")
 
     def _report_export_filename(self, suffix: str) -> str:
@@ -7366,8 +7380,13 @@ class MainWindow(QMainWindow):
     def show_help(self) -> None:
         QMessageBox.information(
             self, "帮助",
-            "从左侧导航切换功能页面。\n\n"
-            "通过左侧导航切换功能页面，设置和帮助入口位于窗口右上角。",
+            "通过左侧导航切换功能页面，设置和帮助入口位于窗口右上角。\n\n"
+            "分类表的“批量整理”会一次性应用已设置的替换、空格和清理规则：\n"
+            "• 替换规则：将名称中的指定文字替换为目标文字。\n"
+            "• 空格规则：为已配置的两个字词加入空格。\n"
+            "• 清理规则：删除名称中匹配的内容；清理后为空的条目会移除。\n"
+            "• A/B 组会按当前字体规则重新判断；C/D 组不会被自动改动。\n\n"
+            "批量整理不会修改文字坐标，操作后可使用“撤销”恢复。",
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802
