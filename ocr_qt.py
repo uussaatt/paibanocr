@@ -19,6 +19,7 @@ import tempfile
 import zipfile
 import re
 import time
+from html import escape as html_escape
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QPainter, QPen, QPixmap, QIcon, QImageReader,
-    QKeySequence, QShortcut, QTextCursor, QCursor,
+    QKeySequence, QShortcut, QTextCursor, QTextTable, QCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFileDialog, QFormLayout, QFrame,
@@ -65,11 +66,16 @@ BORDER = "#E8EAED"
 GROUP_C_GREEN = "#16A269"
 EXCEL_EXPORT_FORMAT_NAMES = {
     "standard": "标准格式（分类 | 名称 | 组值）",
-    "grouped": "分组格式（辈分 | A组 | C组 | B组 | D组）",
+    "grouped": "分组格式（辈分 | t1(A组) | t2(C组) | t3(B组) | d(D组)）",
 }
 EXCEL_EXPORT_FORMAT_SHORT_NAMES = {
     "standard": "标准格式",
     "grouped": "分组格式",
+}
+REPORT_FORMAT_NAMES = {
+    "legacy": "仅名称",
+    "columns": "三列",
+    "grouped": "Markdown 分组表格",
 }
 
 for _font_path in (Path(r"C:\Windows\Fonts\msyh.ttc"), Path(r"C:\Windows\Fonts\msyh.ttf")):
@@ -1915,6 +1921,100 @@ class ClassifierTable(QTableWidget):
         event.acceptProposedAction()
 
 
+class ClassifierHistoryDialog(QDialog):
+    """Browse editable classification-table snapshots without mixing OCR history."""
+
+    def __init__(self, repository: Repository, restore_callback, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.repository = repository
+        self.restore_callback = restore_callback
+        self.items: list[dict[str, Any]] = []
+        self.setWindowTitle("分类表历史")
+        self.resize(760, 480)
+        layout = QVBoxLayout(self)
+        layout.addWidget(section_label("已保存的分类表"))
+        layout.addWidget(muted_label("恢复后可继续修改名称、分组和分类，再导出 Excel。", True))
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["保存时间", "书名", "页码", "条目数"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.doubleClicked.connect(self.restore_selected)
+        layout.addWidget(self.table, 1)
+        buttons = QHBoxLayout()
+        refresh = QPushButton("刷新")
+        refresh.clicked.connect(self.refresh)
+        delete = QPushButton("删除")
+        delete.clicked.connect(self.delete_selected)
+        restore = QPushButton("恢复到分类表")
+        restore.setObjectName("primary")
+        restore.clicked.connect(self.restore_selected)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        buttons.addWidget(refresh)
+        buttons.addWidget(delete)
+        buttons.addStretch()
+        buttons.addWidget(restore)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.repository.reload()
+        self.items = [
+            item for item in (self.repository.get("classifier_history", []) or [])
+            if isinstance(item, dict) and isinstance(item.get("snapshot"), dict)
+        ]
+        self.table.setRowCount(len(self.items))
+        for row, item in enumerate(self.items):
+            values = (
+                item.get("timestamp", ""), item.get("book_name", ""),
+                item.get("page_no", ""), item.get("row_count", 0),
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(row, column, cell)
+
+    def _selected_item(self) -> dict[str, Any] | None:
+        row = self.table.currentRow()
+        return self.items[row] if 0 <= row < len(self.items) else None
+
+    def restore_selected(self, *_args) -> None:
+        item = self._selected_item()
+        if item is None:
+            QMessageBox.information(self, "提示", "请先选择一条分类表历史记录")
+            return
+        if QMessageBox.question(
+            self, "恢复分类表",
+            "恢复会替换当前分类表中的内容，是否继续？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.restore_callback(item)
+        self.accept()
+
+    def delete_selected(self) -> None:
+        item = self._selected_item()
+        if item is None:
+            QMessageBox.information(self, "提示", "请先选择一条分类表历史记录")
+            return
+        if QMessageBox.question(
+            self, "删除分类表历史", "确定删除选中的分类表历史记录吗？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        target_id = str(item.get("id", ""))
+        history = list(self.repository.get("classifier_history", []) or [])
+        if target_id:
+            history = [entry for entry in history if str(entry.get("id", "")) != target_id]
+        else:
+            history = [entry for entry in history if entry is not item]
+        self.repository.set("classifier_history", history)
+        self.refresh()
+
+
 class OCRPage(QWidget):
     statusChanged = Signal(str, str)
     dataChanged = Signal()
@@ -2024,12 +2124,13 @@ class OCRPage(QWidget):
         self.step_group = QButtonGroup(self)
         self.step_group.setExclusive(True)
         self.step_buttons: list[QPushButton] = []
-        self.step_widths = (210, 170, 180)
+        self.step_widths = (210, 170, 180, 180)
         self.step_arrows: list[QLabel] = []
         for index, (title, subtitle) in enumerate([
             ("交互绘图", "标注与区域选择"),
             ("分类表格", "生成结构化数据"),
             ("文本报告", "生成识别报告"),
+            ("Excel 预览", "查看分组导出效果"),
         ], start=1):
             button = StepButton(index, title, subtitle)
             button.setFixedWidth(self.step_widths[index - 1])
@@ -2038,7 +2139,7 @@ class OCRPage(QWidget):
             self.step_group.addButton(button)
             self.step_buttons.append(button)
             step_layout.addWidget(button)
-            if index < 3:
+            if index < 4:
                 arrow = QLabel("›")
                 arrow.setFixedWidth(12)
                 arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2184,11 +2285,17 @@ class OCRPage(QWidget):
         self.book_name = QLineEdit(str(self.repository.get("book_name", "")))
         self.book_name.setProperty("compactParamInput", "true")
         self.book_name.setMinimumWidth(0)
+        self.book_name.editingFinished.connect(
+            lambda: self.repository.set("book_name", self.book_name.text().strip())
+        )
         self.book_page = QSpinBox()
         self.book_page.setProperty("compactParamInput", "true")
         self.book_page.setMinimumWidth(0)
         self.book_page.setRange(1, 999999)
         self.book_page.setValue(int(self.repository.get("book_page", 1) or 1))
+        self.book_page.valueChanged.connect(
+            lambda page: self.repository.set("book_page", int(page))
+        )
         form.addRow("书名", self.book_name)
         form.addRow("当前页", self.book_page)
         scroll_layout.addLayout(form)
@@ -2229,6 +2336,8 @@ class OCRPage(QWidget):
         self.result_stack.addWidget(self.table_page)
         self.report_page, self.report = self._build_report_page()
         self.result_stack.addWidget(self.report_page)
+        self.excel_preview_page, self.excel_preview_table = self._build_excel_preview_page()
+        self.result_stack.addWidget(self.excel_preview_page)
         result_layout.addWidget(self.result_stack)
         workspace.addWidget(result_card, 1)
         self.page_undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
@@ -2353,6 +2462,8 @@ class OCRPage(QWidget):
         split_a.clicked.connect(self.split_group_a)
         cleanup = QPushButton("批量整理")
         cleanup.clicked.connect(self.batch_cleanup)
+        classifier_history = QPushButton("分类表历史")
+        classifier_history.clicked.connect(self.show_classifier_history)
         toolbar.addWidget(undo)
         toolbar.addWidget(add)
         toolbar.addWidget(delete)
@@ -2361,6 +2472,7 @@ class OCRPage(QWidget):
         toolbar.addWidget(merge)
         toolbar.addWidget(split_a)
         toolbar.addWidget(cleanup)
+        toolbar.addWidget(classifier_history)
         toolbar.addStretch()
         toolbar.addWidget(verify)
         toolbar.addWidget(advanced)
@@ -2675,8 +2787,52 @@ class OCRPage(QWidget):
         self._sync_report_controls()
         return page, editor
 
+    def _build_excel_preview_page(self) -> tuple[QWidget, QTableWidget]:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        header = QHBoxLayout()
+        header.addWidget(section_label("Excel 分组表格预览"))
+        header.addStretch()
+        refresh = QPushButton("刷新预览")
+        refresh.clicked.connect(self._refresh_excel_preview)
+        header.addWidget(refresh)
+        layout.addLayout(header)
+        layout.addWidget(muted_label("预览内容与分组 Excel 导出一致，仅供核对，不会修改文本报告。"))
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["辈分", "t1(A组)", "t2(C组)", "t3(B组)", "d(D组)"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(False)
+        table.setWordWrap(True)
+        table.setShowGrid(True)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((70, 180, 260, 260, 260)):
+            table.setColumnWidth(column, width)
+        layout.addWidget(table, 1)
+        return page, table
+
     def _switch_step(self, index: int) -> None:
         self.result_stack.setCurrentIndex(index)
+        if index == 3:
+            self._refresh_excel_preview()
+
+    def _refresh_excel_preview(self) -> None:
+        if not hasattr(self, "excel_preview_table"):
+            return
+        table = self.excel_preview_table
+        entries = self._parse_report_entries()
+        grouped_rows = self._grouped_excel_rows(entries)
+        table.setRowCount(len(grouped_rows))
+        for row_index, row in enumerate(grouped_rows):
+            line_count = 1
+            for column, key in enumerate(("辈分", "t1(A组)", "t2(C组)", "t3(B组)", "d(D组)")):
+                value = str(row.get(key, ""))
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop))
+                table.setItem(row_index, column, item)
+                line_count = max(line_count, value.count("\n") + 1)
+            table.setRowHeight(row_index, max(28, line_count * 22))
 
     def _show_top_notice(self, state: str, text: str, duration: int = 4200,
                          undo_available: bool = False) -> None:
@@ -3137,6 +3293,110 @@ class OCRPage(QWidget):
         if reorder and len(grouped_indices) == len(self.rows):
             self.rows = [self.rows[index] for index in grouped_indices]
 
+    def _classifier_history_snapshot(self) -> dict[str, Any]:
+        """Return the JSON-safe, editable portion of the current classifier state."""
+        row_keys = (
+            "label", "y", "x", "width", "height", "confidence", "group",
+            "category", "category_key", "marked", "_source_index", "_source_line",
+            "_source_path", "_source_file", "_source_box_exact",
+        )
+        rows = []
+        for row in self.rows:
+            saved = {key: row[key] for key in row_keys if key in row}
+            rows.append(saved)
+        return {
+            "rows": rows,
+            "thresholds": [float(value) for value in self.plot.thresholds],
+            "lasso_categories": list(self.lasso_categories),
+            "lasso_count": int(self.lasso_count),
+        }
+
+    def save_classifier_history(self, notify: bool = True) -> bool:
+        if not self.rows:
+            return False
+        self.repository.save_classifier_history(
+            self._classifier_history_snapshot(),
+            self.book_name.text().strip(),
+            self.book_page.value(),
+        )
+        if notify:
+            self.statusChanged.emit("done", f"分类表已保存到历史 · {len(self.rows)} 条")
+            self.dataChanged.emit()
+        return True
+
+    def show_classifier_history(self) -> None:
+        ClassifierHistoryDialog(self.repository, self.restore_classifier_history, self).exec()
+
+    def restore_classifier_history(self, record: dict[str, Any]) -> None:
+        snapshot = record.get("snapshot", {})
+        saved_rows = snapshot.get("rows", []) if isinstance(snapshot, dict) else []
+        if not isinstance(saved_rows, list) or not saved_rows:
+            QMessageBox.warning(self, "恢复失败", "该分类表历史记录没有可恢复的数据")
+            return
+
+        def number(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        rows: list[dict[str, Any]] = []
+        for saved in saved_rows:
+            if not isinstance(saved, dict):
+                continue
+            row = {
+                "label": str(saved.get("label", "")),
+                "y": number(saved.get("y")),
+                "x": number(saved.get("x")),
+                "width": number(saved.get("width")),
+                "height": number(saved.get("height")),
+                "confidence": number(saved.get("confidence")),
+                "group": str(saved.get("group", "B")),
+                "category": str(saved.get("category", "未分类")),
+                "category_key": str(saved.get("category_key", "数据区")),
+                "marked": bool(saved.get("marked", False)),
+                "_source_index": int(number(saved.get("_source_index"))),
+                "_source_line": int(number(saved.get("_source_line"))),
+                "_source_path": str(saved.get("_source_path", "")),
+                "_source_file": str(saved.get("_source_file", "")),
+                "_source_box_exact": bool(saved.get("_source_box_exact", False)),
+            }
+            image_width = (
+                QImageReader(row["_source_path"]).size().width()
+                if row["_source_path"] and Path(row["_source_path"]).is_file() else 0
+            )
+            row["_source_rect"] = self._estimated_text_rect(row, image_width)
+            rows.append(row)
+        if not rows:
+            QMessageBox.warning(self, "恢复失败", "该分类表历史记录格式无效")
+            return
+        self.rows = rows
+        self.results = []
+        self.paths = list(dict.fromkeys(
+            row["_source_path"] for row in rows if row["_source_path"]
+        ))
+        self.plot.thresholds = [
+            number(value) for value in snapshot.get("thresholds", [])
+            if isinstance(value, (int, float, str))
+        ]
+        self.lasso_categories = [
+            str(value) for value in snapshot.get("lasso_categories", [])
+        ]
+        self.lasso_count = int(number(snapshot.get("lasso_count"), len(self.lasso_categories)))
+        self.lasso_undo_history.clear()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.book_name.setText(str(record.get("book_name", "")))
+        self.book_page.setValue(max(1, int(number(record.get("page_no"), 1))))
+        self.parsed_snapshot = self._capture_classifier_state()
+        self._populate_results()
+        self._switch_step(1)
+        if self.rows:
+            self.table.selectRow(0)
+            self.table.setCurrentCell(0, 0)
+        self.statusChanged.emit("done", f"已恢复分类表历史 · {len(self.rows)} 条")
+        self.dataChanged.emit()
+
     def _capture_classifier_state(self, thresholds: list[float] | None = None,
                                   redraw_plot: bool = True) -> dict[str, Any]:
         return {
@@ -3541,6 +3801,9 @@ class OCRPage(QWidget):
 
     def _update_report(self) -> None:
         report_format = str(self.repository.get("report_format", "legacy"))
+        if report_format == "grouped":
+            self.report.setHtml(self._grouped_report_html(self._grouped_report_text()))
+            return
         separator = "----\n" if self.repository.get("report_separator", "line") == "line" else "\n"
         sections: list[tuple[str, list[dict[str, Any]]]] = []
         for row in self.rows:
@@ -3577,6 +3840,164 @@ class OCRPage(QWidget):
             output += separator
         self.report.setPlainText(output)
 
+    def _grouped_report_text(self) -> str:
+        """Build an editable Markdown table for the grouped report."""
+        grouped_rows: list[dict[str, Any]] = []
+        current = {
+            "辈分": "", "A组": "", "B组": [], "C组": [], "D组": [],
+        }
+        for row in self.rows:
+            _marker_count, name = self._split_blank_line_markers(str(row.get("label", "")))
+            group = str(row.get("group", "B"))
+            if group == "A":
+                if current["A组"]:
+                    grouped_rows.append(current)
+                    current = {"辈分": "", "A组": "", "B组": [], "C组": [], "D组": []}
+                current["辈分"] = str(row.get("category", ""))
+                current["A组"] = name
+            elif group in {"B", "C", "D"}:
+                current[f"{group}组"].append(name)
+
+        if current["A组"] or current["B组"] or current["C组"] or current["D组"]:
+            grouped_rows.append(current)
+
+        lines = [
+            "| 辈分 | a组 | c组 | b组 | d组 |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for grouped_row in grouped_rows:
+            line_count = max(
+                1,
+                len(grouped_row["C组"]),
+                len(grouped_row["B组"]),
+                len(grouped_row["D组"]),
+            )
+            for index in range(line_count):
+                lines.append(self._format_markdown_row([
+                    grouped_row["辈分"] if index == 0 else "",
+                    grouped_row["A组"] if index == 0 else "",
+                    grouped_row["C组"][index] if index < len(grouped_row["C组"]) else "",
+                    grouped_row["B组"][index] if index < len(grouped_row["B组"]) else "",
+                    grouped_row["D组"][index] if index < len(grouped_row["D组"]) else "",
+                ]))
+        return "\n".join(lines)
+
+    def _report_source_text(self) -> str:
+        """Read the editable Markdown source when the report is rendered."""
+        if str(self.repository.get("report_format", "legacy")) == "grouped":
+            for frame in self.report.document().rootFrame().childFrames():
+                if not isinstance(frame, QTextTable) or frame.rows() < 1 or frame.columns() < 5:
+                    continue
+                lines = [
+                    "| 辈分 | a组 | c组 | b组 | d组 |",
+                    "| :--- | :--- | :--- | :--- | :--- |",
+                ]
+                for row in range(1, frame.rows()):
+                    values: list[str] = []
+                    column = 0
+                    while column < 5:
+                        cell = frame.cellAt(row, column)
+                        start = cell.firstCursorPosition().position()
+                        end = cell.lastCursorPosition().position()
+                        if start == end:
+                            value = ""
+                        else:
+                            block = self.report.document().findBlock(start)
+                            block_text: list[str] = []
+                            while block.isValid() and block.position() <= end:
+                                block_text.append(block.text())
+                                if block.position() + block.length() >= end:
+                                    break
+                                block = block.next()
+                            value = "\n".join(block_text).strip()
+                        value = re.sub(r"\s*\n\s*", "<br>", value)
+                        values.append(value)
+                        span = max(1, cell.columnSpan())
+                        values.extend([""] * min(span - 1, 5 - len(values)))
+                        column += span
+                    lines.append(self._format_markdown_row(values))
+                return "\n".join(lines)
+            return self.report.toMarkdown()
+        return self.report.toPlainText()
+
+    @classmethod
+    def _grouped_report_html(cls, markdown: str) -> str:
+        """Render the Markdown source as a fixed five-column editable table."""
+        rows: list[list[str]] = []
+        for raw_line in str(markdown).splitlines():
+            cells = cls._split_markdown_row(raw_line)
+            if cells is None or len(cells) < 5:
+                continue
+            if cls._is_markdown_separator(cells):
+                continue
+            rows.append(cells[:5])
+        if not rows:
+            return ""
+        output = [
+            '<table border="1" cellspacing="0" cellpadding="4" '
+            'style="border-collapse:collapse; width:100%;">'
+        ]
+        header = rows[0]
+        output.append("<tr>" + "".join(
+            '<th align="left" valign="top">' + html_escape(value) + "</th>"
+            for value in header
+        ) + "</tr>")
+        for values in rows[1:]:
+            cells_html: list[str] = []
+            for value in values:
+                parts = cls._split_markdown_names(value)
+                content = "<br>".join(html_escape(part) for part in parts)
+                cells_html.append(
+                    '<td align="left" valign="top">' + content + "</td>"
+                )
+            output.append("<tr>" + "".join(cells_html) + "</tr>")
+        output.append("</table>")
+        return "".join(output)
+
+    @staticmethod
+    def _markdown_escape_cell(value: Any) -> str:
+        """Escape a cell value without introducing alignment whitespace."""
+        return str(value or "").strip().replace("|", r"\|")
+
+    @classmethod
+    def _format_markdown_row(cls, values: list[Any]) -> str:
+        return "| " + " | ".join(cls._markdown_escape_cell(value) for value in values) + " |"
+
+    @staticmethod
+    def _split_markdown_row(line: str) -> list[str] | None:
+        """Split a pipe-delimited Markdown row while honoring escaped pipes."""
+        stripped = str(line).strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            return None
+        body = stripped[1:-1]
+        cells: list[str] = []
+        current: list[str] = []
+        escaped = False
+        for char in body:
+            if char == "|" and not escaped:
+                cells.append("".join(current).strip().replace(r"\|", "|"))
+                current = []
+                continue
+            current.append(char)
+            if char == "\\" and not escaped:
+                escaped = True
+            else:
+                escaped = False
+        cells.append("".join(current).strip().replace(r"\|", "|"))
+        return cells
+
+    @classmethod
+    def _is_markdown_header(cls, cells: list[str]) -> bool:
+        return [cell.strip().lower() for cell in cells] == ["辈分", "a组", "c组", "b组", "d组"]
+
+    @staticmethod
+    def _is_markdown_separator(cells: list[str]) -> bool:
+        return len(cells) >= 5 and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells[:5])
+
+    @staticmethod
+    def _split_markdown_names(value: str) -> list[str]:
+        return [part.strip() for part in re.split(r"<br\s*/?>", value, flags=re.IGNORECASE) if part.strip()]
+
     @staticmethod
     def _split_blank_line_markers(label: str) -> tuple[int, str]:
         marker_count = len(label) - len(label.lstrip(BLANK_LINE_MARKER))
@@ -3590,8 +4011,11 @@ class OCRPage(QWidget):
         self._report_config_state = state
         if hasattr(self, "separator_button"):
             self.separator_button.setText("分隔：----" if separator == "line" else "分隔：空行")
+            self.separator_button.setEnabled(report_format != "grouped")
         if hasattr(self, "report_format_button"):
-            self.report_format_button.setText("格式：三列" if report_format == "columns" else "格式：仅名称")
+            self.report_format_button.setText(
+                f"格式：{REPORT_FORMAT_NAMES.get(report_format, REPORT_FORMAT_NAMES['legacy'])}"
+            )
         if regenerate_on_change and previous is not None and previous != state and hasattr(self, "report"):
             self._update_report()
 
@@ -3603,7 +4027,9 @@ class OCRPage(QWidget):
 
     def toggle_report_format(self) -> None:
         current = str(self.repository.get("report_format", "legacy"))
-        self.repository.set("report_format", "legacy" if current == "columns" else "columns")
+        formats = list(REPORT_FORMAT_NAMES)
+        current_index = formats.index(current) if current in formats else 0
+        self.repository.set("report_format", formats[(current_index + 1) % len(formats)])
         self._sync_report_controls()
         self._update_report()
 
@@ -3644,6 +4070,9 @@ class OCRPage(QWidget):
         self._apply_shared_font_size(size)
 
     def _replace_report_text(self, text: str) -> None:
+        if str(self.repository.get("report_format", "legacy")) == "grouped":
+            self.report.setHtml(self._grouped_report_html(text))
+            return
         cursor = self.report.textCursor()
         cursor.beginEditBlock()
         cursor.select(QTextCursor.SelectionType.Document)
@@ -3676,11 +4105,17 @@ class OCRPage(QWidget):
         separator = "----" if self.repository.get("report_separator", "line") == "line" else ""
         output: list[str] = []
         changed = 0
-        for line in self.report.toPlainText().splitlines(keepends=True):
+        source_text = self._report_source_text()
+        for line in source_text.splitlines(keepends=True):
             body = line.rstrip("\r\n")
             ending = line[len(body):]
             stripped = body.strip()
-            if not stripped or (stripped.startswith("【") and stripped.endswith("】:")) or (separator and stripped == separator):
+            if (
+                not stripped
+                or (stripped.startswith("【") and stripped.endswith("】" + ":"))
+                or (separator and stripped == separator)
+                or (report_format == "grouped" and stripped == "辈分\tA组\tB组\tC组\tD组")
+            ):
                 output.append(line)
                 continue
             if report_format == "columns":
@@ -3693,6 +4128,36 @@ class OCRPage(QWidget):
                     parts[1] = parts[1].replace(str(rule["find"]), str(rule.get("replace", "")))
                 changed += int(parts[1] != original)
                 output.append("\t".join(parts) + ending)
+            elif report_format == "grouped":
+                markdown_parts = self._split_markdown_row(body)
+                if markdown_parts is not None and len(markdown_parts) >= 5:
+                    if self._is_markdown_header(markdown_parts) or self._is_markdown_separator(markdown_parts):
+                        output.append(line)
+                        continue
+                    row_changed = False
+                    for index in range(1, 5):
+                        original = markdown_parts[index]
+                        for rule in rules:
+                            markdown_parts[index] = markdown_parts[index].replace(
+                                str(rule["find"]), str(rule.get("replace", ""))
+                            )
+                        row_changed = row_changed or markdown_parts[index] != original
+                    changed += int(row_changed)
+                    output.append(self._format_markdown_row(markdown_parts[:5]) + ending)
+                    continue
+                # Keep accepting reports generated by older versions.
+                parts = body.split("\t")
+                if len(parts) < 5:
+                    output.append(line)
+                    continue
+                row_changed = False
+                for index in range(1, 5):
+                    original = parts[index]
+                    for rule in rules:
+                        parts[index] = parts[index].replace(str(rule["find"]), str(rule.get("replace", "")))
+                    row_changed = row_changed or parts[index] != original
+                changed += int(row_changed)
+                output.append("\t".join(parts) + ending)
             else:
                 original = body
                 for rule in rules:
@@ -3700,18 +4165,20 @@ class OCRPage(QWidget):
                 changed += int(body != original)
                 output.append(body + ending)
         new_text = "".join(output)
-        if new_text != self.report.toPlainText():
+        if new_text != source_text:
             self._replace_report_text(new_text)
         self.statusChanged.emit("done", f"报告替换完成 · 修改 {changed} 行")
 
     def _parse_report_entries(self) -> list[dict[str, Any]]:
         report_format = str(self.repository.get("report_format", "legacy"))
+        if report_format == "grouped":
+            return self._parse_grouped_report_entries()
         separator = "----" if self.repository.get("report_separator", "line") == "line" else ""
         entries: list[dict[str, Any]] = []
         current_category = ""
         source_index = 0
         pending_blank_lines = 0
-        for raw_line in self.report.toPlainText().splitlines():
+        for raw_line in self._report_source_text().splitlines():
             line = raw_line.strip()
             if not line:
                 pending_blank_lines += 1
@@ -3747,6 +4214,47 @@ class OCRPage(QWidget):
                 })
             source_index += 1
             pending_blank_lines = 0
+        return entries
+
+    def _parse_grouped_report_entries(self) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        current_category = ""
+        for raw_line in self._report_source_text().splitlines():
+            markdown_parts = self._split_markdown_row(raw_line)
+            if markdown_parts is not None and len(markdown_parts) >= 5:
+                if self._is_markdown_header(markdown_parts) or self._is_markdown_separator(markdown_parts):
+                    continue
+                parts = markdown_parts[:5]
+                category = parts[0].strip()
+                if category:
+                    current_category = category
+                for group, cell in zip(("A", "C", "B", "D"), parts[1:5]):
+                    for name in self._split_markdown_names(cell):
+                        entries.append({
+                            "category": current_category or "未分类",
+                            "name": name,
+                            "group": group,
+                            "blank_lines_before": 0,
+                        })
+                continue
+            if raw_line.strip() == "辈分\tA组\tB组\tC组\tD组":
+                continue
+            parts = raw_line.split("\t")
+            if len(parts) < 5:
+                continue
+            category = parts[0].strip()
+            if category:
+                current_category = category
+            for group, name in zip(("A", "B", "C", "D"), parts[1:5]):
+                for name in self._split_markdown_names(name.strip()):
+                    if not name:
+                        continue
+                    entries.append({
+                        "category": current_category or "未分类",
+                        "name": name,
+                        "group": group,
+                        "blank_lines_before": 0,
+                    })
         return entries
 
     def _group_for_label(self, label: str) -> str:
@@ -4597,7 +5105,7 @@ class OCRPage(QWidget):
         self._export_toast = toast
 
     def export_txt(self) -> None:
-        content = self.report.toPlainText()
+        content = self._report_source_text()
         if not content.strip():
             QMessageBox.warning(self, "无法导出", "当前文本报告为空。")
             return
@@ -4739,13 +5247,49 @@ class OCRPage(QWidget):
                 for row_number, entry in enumerate(merged_entries, start=2):
                     line_count = max(1, entry["name"].count("\n") + 1)
                     sheet.row_dimensions[row_number].height = max(20, line_count * 18)
-            self.repository.save_export_record(str(path), self.report.toPlainText())
+            self.repository.save_export_record(str(path), self._report_source_text())
+            self.save_classifier_history(notify=False)
             self.statusChanged.emit(
                 "done", f"报告 Excel 已导出（标准格式） · {len(entries)} 条合并为 {len(merged_entries)} 组"
             )
             self._show_file_toast(path)
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
+
+    def _grouped_excel_rows(self, entries: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """Build the rows shared by the grouped Excel export and its preview."""
+        grouped_rows: list[dict[str, str]] = []
+        current_row = {
+            "辈分": "", "t1(A组)": "", "t2(C组)": "", "t3(B组)": "", "d(D组)": "",
+        }
+        for entry in entries:
+            group = str(entry.get("group", ""))
+            name = str(entry.get("name", ""))
+            category = str(entry.get("category", ""))
+            if group == "A":
+                # The first A group claims any preceding C/B/D values, matching the export layout.
+                if current_row["t1(A组)"]:
+                    grouped_rows.append(current_row.copy())
+                    current_row = {
+                        "辈分": "", "t1(A组)": "", "t2(C组)": "", "t3(B组)": "", "d(D组)": "",
+                    }
+                current_row["辈分"] = category
+                current_row["t1(A组)"] = name
+            elif group == "C":
+                current_row["t2(C组)"] = "\n".join(
+                    value for value in (current_row["t2(C组)"], name) if value
+                )
+            elif group == "B":
+                current_row["t3(B组)"] = "\n".join(
+                    value for value in (current_row["t3(B组)"], name) if value
+                )
+            elif group == "D":
+                current_row["d(D组)"] = "\n".join(
+                    value for value in (current_row["d(D组)"], name) if value
+                )
+        if any(current_row.values()):
+            grouped_rows.append(current_row.copy())
+        return grouped_rows
 
     def _export_excel_grouped_format(self, entries: list[dict[str, Any]]) -> None:
         """分组格式：辈分 | t1(A组) | t2(C组) | t3(B组) | d(D组)
@@ -4762,54 +5306,7 @@ class OCRPage(QWidget):
             import pandas as pd
             from openpyxl.styles import Alignment, Font, Border, Side
             
-            # 按A组分组构建数据
-            grouped_rows: list[dict[str, Any]] = []
-            current_row: dict[str, Any] = {
-                "辈分": "", "t1(A组)": "", "t2(C组)": "", "t3(B组)": "", "d(D组)": ""
-            }
-            
-            for entry in entries:
-                group = entry.get("group", "")
-                name = entry.get("name", "")
-                category = str(entry.get("category", ""))
-                
-                if group == "A":
-                    # 已有 A 组时才结束上一行；首个 A 组应接管临时记录，
-                    # 避免此前出现的 D/C/B 组被导出为“辈分”为空的独立行。
-                    if current_row["t1(A组)"]:
-                        grouped_rows.append(current_row.copy())
-
-                        current_row = {
-                            "辈分": "",
-                            "t1(A组)": "",
-                            "t2(C组)": "",
-                            "t3(B组)": "",
-                            "d(D组)": ""
-                        }
-                    current_row["辈分"] = category  # 使用软件中的分类值作为辈分
-                    current_row["t1(A组)"] = name
-                elif group == "C":
-                    # C组追加到t2列（换行连接）
-                    if current_row["t2(C组)"]:
-                        current_row["t2(C组)"] += "\n" + name
-                    else:
-                        current_row["t2(C组)"] = name
-                elif group == "B":
-                    # B组追加到t3列（换行连接）
-                    if current_row["t3(B组)"]:
-                        current_row["t3(B组)"] += "\n" + name
-                    else:
-                        current_row["t3(B组)"] = name
-                elif group == "D":
-                    # 保留文本报告中的行分隔及名称中的 |，不在导出阶段生成 |。
-                    if current_row["d(D组)"]:
-                        current_row["d(D组)"] += "\n" + name
-                    else:
-                        current_row["d(D组)"] = name
-            
-            # 保存最后一行
-            if current_row["t1(A组)"] or current_row["t2(C组)"] or current_row["t3(B组)"] or current_row["d(D组)"]:
-                grouped_rows.append(current_row.copy())
+            grouped_rows = self._grouped_excel_rows(entries)
             
             if not grouped_rows:
                 QMessageBox.warning(self, "导出失败", "没有可导出的数据（至少需要一个A组记录）")
@@ -4834,7 +5331,7 @@ class OCRPage(QWidget):
                 # 表头样式
                 for cell in sheet[1]:
                     cell.font = Font(bold=True, size=11)
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
                     cell.border = thin_border
                 
                 # 数据单元格样式和边框
@@ -4844,7 +5341,7 @@ class OCRPage(QWidget):
                         cell.border = thin_border
                 
                 # 设置列宽
-                sheet.column_dimensions["A"].width = 6   # 革分
+                sheet.column_dimensions["A"].width = 6   # 辈分
                 sheet.column_dimensions["B"].width = 20  # t1(A组)
                 sheet.column_dimensions["C"].width = 30  # t2(C组)
                 sheet.column_dimensions["D"].width = 30  # t3(B组)
@@ -4859,7 +5356,8 @@ class OCRPage(QWidget):
                         max_lines = max(max_lines, lines)
                     sheet.row_dimensions[row_number].height = max(20, max_lines * 18)
             
-            self.repository.save_export_record(str(path), self.report.toPlainText())
+            self.repository.save_export_record(str(path), self._report_source_text())
+            self.save_classifier_history(notify=False)
             self.statusChanged.emit(
                 "done", f"报告 Excel 已导出（分组格式） · {len(entries)} 条 → {len(grouped_rows)} 行"
             )
@@ -4875,8 +5373,9 @@ class OCRPage(QWidget):
         try:
             import opencc
             converter = opencc.OpenCC(mode)
-            converted = converter.convert(self.report.toPlainText())
-            if converted != self.report.toPlainText():
+            source_text = self._report_source_text()
+            converted = converter.convert(source_text)
+            if converted != source_text:
                 self._replace_report_text(converted)
         except ImportError:
             QMessageBox.warning(self, "缺少组件", "请安装 opencc-python-reimplemented")
@@ -6487,11 +6986,11 @@ class ReportSettingsDialog(QDialog):
         layout.addWidget(section_label("报告格式设置"))
         form = QFormLayout()
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["legacy", "columns"])
+        for format_key, format_name in REPORT_FORMAT_NAMES.items():
+            self.format_combo.addItem(format_name, format_key)
         current_format = str(repository.get("report_format", "legacy"))
-        if self.format_combo.findText(current_format) < 0:
-            self.format_combo.addItem(current_format)
-        self.format_combo.setCurrentText(current_format)
+        current_index = self.format_combo.findData(current_format)
+        self.format_combo.setCurrentIndex(current_index if current_index >= 0 else 0)
         self.separator_combo = QComboBox()
         self.separator_combo.addItems(["line", "blank"])
         current_separator = str(repository.get("report_separator", "line"))
@@ -6501,14 +7000,14 @@ class ReportSettingsDialog(QDialog):
         form.addRow("报告格式", self.format_combo)
         form.addRow("分类分隔", self.separator_combo)
         layout.addLayout(form)
-        layout.addWidget(muted_label("legacy=经典格式，columns=列式格式；line=分隔线，blank=空行。", True))
+        layout.addWidget(muted_label("Markdown 分组表格列顺序为：辈分、a组、c组、b组、d组；同组多条名称使用 <br> 放在同一单元格内。", True))
         save = QPushButton("保存")
         save.setObjectName("primary")
         save.clicked.connect(self.save)
         layout.addWidget(save, 0, Qt.AlignmentFlag.AlignRight)
 
     def save(self) -> None:
-        self.repository.set("report_format", self.format_combo.currentText())
+        self.repository.set("report_format", str(self.format_combo.currentData() or "legacy"))
         self.repository.set("report_separator", self.separator_combo.currentText())
         self.accept()
 
@@ -6864,6 +7363,13 @@ class SettingsDialog(QDialog):
             current_index if current_index >= 0 else self.excel_export_format.findData("grouped")
         )
         form.addRow("Excel默认导出格式", self.excel_export_format)
+        self.report_format = QComboBox()
+        for format_key, format_name in REPORT_FORMAT_NAMES.items():
+            self.report_format.addItem(format_name, format_key)
+        current_report_format = str(repository.get("report_format", "legacy") or "legacy")
+        report_format_index = self.report_format.findData(current_report_format)
+        self.report_format.setCurrentIndex(report_format_index if report_format_index >= 0 else 0)
+        form.addRow("文本报告展示格式", self.report_format)
         layout.addLayout(form)
         layout.addWidget(section_label("每日识别限制"))
         limit_form = QFormLayout()
@@ -6927,6 +7433,7 @@ class SettingsDialog(QDialog):
         self.repository.set(
             "excel_export_format", str(self.excel_export_format.currentData() or "grouped")
         )
+        self.repository.set("report_format", str(self.report_format.currentData() or "legacy"))
         if getattr(self, "daily_limit_unlocked", False):
             limits = self.repository.get("daily_ocr_limits", {}) or {}
             limits = dict(limits) if isinstance(limits, dict) else {}
@@ -7375,6 +7882,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         SettingsDialog(self.repository, self).exec()
+        self.ocr_page._sync_report_controls(regenerate_on_change=True)
         self.home_page.refresh()
 
     def show_help(self) -> None:
@@ -7386,7 +7894,8 @@ class MainWindow(QMainWindow):
             "• 空格规则：为已配置的两个字词加入空格。\n"
             "• 清理规则：删除名称中匹配的内容；清理后为空的条目会移除。\n"
             "• A/B 组会按当前字体规则重新判断；C/D 组不会被自动改动。\n\n"
-            "批量整理不会修改文字坐标，操作后可使用“撤销”恢复。",
+            "批量整理不会修改文字坐标，操作后可使用“撤销”恢复。\n\n"
+            "导出 Excel 时会自动保存当前已校对的分类表；通过“分类表历史”恢复后可继续修改，再导出 Excel。",
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802

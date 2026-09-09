@@ -306,6 +306,8 @@ class DataStore:
         "stats": {},
         "history": [],
         "history_limit": 100,
+        "classifier_history": [],
+        "classifier_history_limit": 100,
         "ocr_cache": {},
         "size_limits": {},
         "font_config": {"font_size": 11},
@@ -577,6 +579,24 @@ class Repository:
                 mode_stats["success"] += 1
                 mode_stats["api_lines"] += count
         self.set("stats", stats)
+
+    def save_classifier_history(self, snapshot: dict[str, Any], book_name: str,
+                                page_no: int) -> None:
+        """Save an editable classification-table snapshot separately from OCR history."""
+        history = list(self.get("classifier_history", []) or [])
+        limit = int(self.get(
+            "classifier_history_limit", self.get("history_limit", 100)
+        ) or 100)
+        timestamp = datetime.now()
+        history.insert(0, {
+            "id": timestamp.strftime("%Y%m%d%H%M%S%f"),
+            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "book_name": str(book_name or ""),
+            "page_no": int(page_no),
+            "row_count": len(snapshot.get("rows", []) or []),
+            "snapshot": copy.deepcopy(snapshot),
+        })
+        self.set("classifier_history", history[:max(1, limit)])
 
     def save_export_record(self, file_path: str, content: str) -> None:
         """Persist exports with the exact legacy history/backup schema."""
