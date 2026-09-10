@@ -3769,7 +3769,7 @@ class OCRApp:
                 page_no = ''
         if book_name:
             if page_no != '':
-                display_page = page_no - 1
+                display_page = page_no - 2
                 return f'{book_name}_第{display_page}页'
             return book_name
         return datetime.now().strftime('%Y-%m-%d')

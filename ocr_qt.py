@@ -273,13 +273,13 @@ def _ensure_windows_icon_files() -> tuple[str, str]:
 def apply_windows_taskbar_icon(window: QWidget) -> None:
     if sys.platform != "win32":
         return
-    app_path, transparent_path = _ensure_windows_icon_files()
+    app_path, _transparent_path = _ensure_windows_icon_files()
     user32 = ctypes.windll.user32
     load_image = user32.LoadImageW
     load_image.restype = ctypes.c_void_p
     image_icon = 1
     lr_loadfromfile = 0x00000010
-    small_icon = load_image(None, transparent_path, image_icon, 16, 16, lr_loadfromfile)
+    small_icon = load_image(None, app_path, image_icon, 16, 16, lr_loadfromfile)
     big_icon = load_image(None, app_path, image_icon, 0, 0, lr_loadfromfile)
     if not small_icon or not big_icon:
         return
@@ -2829,7 +2829,7 @@ class OCRPage(QWidget):
             for column, key in enumerate(("辈分", "t1(A组)", "t2(C组)", "t3(B组)", "d(D组)")):
                 value = str(row.get(key, ""))
                 item = QTableWidgetItem(value)
-                item.setTextAlignment(int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                 table.setItem(row_index, column, item)
                 line_count = max(line_count, value.count("\n") + 1)
             table.setRowHeight(row_index, max(28, line_count * 22))
@@ -3909,7 +3909,7 @@ class OCRPage(QWidget):
                                 if block.position() + block.length() >= end:
                                     break
                                 block = block.next()
-                            value = "\n".join(block_text).strip()
+                            value = "\n".join(block_text).replace("\u2028", "\n").replace("\u2029", "\n").strip()
                         value = re.sub(r"\s*\n\s*", "<br>", value)
                         values.append(value)
                         span = max(1, cell.columnSpan())
@@ -3933,22 +3933,59 @@ class OCRPage(QWidget):
             rows.append(cells[:5])
         if not rows:
             return ""
+        # A record is one A-group row plus its following C/B/D rows.  Collapse
+        # those source rows into one visual table row so no internal rules can
+        # appear between names belonging to the same record.
+        records: list[list[str]] = []
+        current_record: list[str] | None = None
+        for values in rows[1:]:
+            starts_record = bool(values[0].strip() or values[1].strip())
+            if starts_record or current_record is None:
+                if current_record is not None:
+                    records.append(current_record)
+                current_record = list(values)
+                continue
+            for index, value in enumerate(values):
+                if value.strip():
+                    current_record[index] = (
+                        f"{current_record[index]}<br>{value}"
+                        if current_record[index].strip() else value
+                    )
+        if current_record is not None:
+            records.append(current_record)
         output = [
-            '<table border="1" cellspacing="0" cellpadding="4" '
-            'style="border-collapse:collapse; width:100%;">'
+            '<table border="0" cellspacing="0" cellpadding="4" '
+            'style="border-collapse:collapse; width:100%; border:2px solid #69727D;">'
         ]
         header = rows[0]
         output.append("<tr>" + "".join(
-            '<th align="left" valign="top">' + html_escape(value) + "</th>"
+            '<th align="center" valign="middle" style="text-align:center; '
+            'vertical-align:middle; border-top:1px solid #69727D; '
+            'border-right:1px solid #69727D; border-bottom:2px solid #4F5965; '
+            'border-left:1px solid #69727D;">' + html_escape(value) + "</th>"
             for value in header
         ) + "</tr>")
-        for values in rows[1:]:
+        for values in records:
             cells_html: list[str] = []
-            for value in values:
+            for column, value in enumerate(values):
                 parts = cls._split_markdown_names(value)
                 content = "<br>".join(html_escape(part) for part in parts)
+                # B 组需要左上对齐；D 组只取消水平居中，继续保持垂直居中。
+                if column == 3:
+                    align = "left"
+                    valign = "top"
+                elif column == 4:
+                    align = "left"
+                    valign = "middle"
+                else:
+                    align = "center"
+                    valign = "middle"
                 cells_html.append(
-                    '<td align="left" valign="top">' + content + "</td>"
+                    f'<td align="{align}" valign="{valign}" style="text-align:{align}; '
+                    f'vertical-align:{valign}; border-top:2px solid #4F5965; '
+                    'border-right:1px solid #8A929C; border-bottom:0; '
+                    'border-left:1px solid #8A929C;">'
+                    + content + "</td>"
                 )
             output.append("<tr>" + "".join(cells_html) + "</tr>")
         output.append("</table>")
@@ -7527,13 +7564,10 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.repository = Repository()
-        # Keep the native title bar controls, but hide its top-left icon/title.
-        # A truly empty title may fall back to QApplication.applicationName().
-        # Use an invisible character so Windows leaves the caption visually blank.
+        # Keep the native title bar controls and use the visible app icon for
+        # the title bar and Windows taskbar entry.
         self.setWindowTitle("\u200b")
-        transparent_icon = QPixmap(16, 16)
-        transparent_icon.fill(Qt.GlobalColor.transparent)
-        self.setWindowIcon(QIcon(transparent_icon))
+        self.setWindowIcon(app_icon())
         self.setMinimumSize(1000, 680)
         config = self.repository.get("qt_window_config", {}) or {}
         self.resize(int(config.get("width", 1050)), int(config.get("height", 730)))
