@@ -3550,20 +3550,19 @@ class OCRPage(QWidget):
         if str(self.rows[row_index].get("group", "")) == group:
             return
         self._snapshot(redraw_plot=False)
+        selected_ids = {
+            id(self.rows[index]) for index in self._selected_rows()
+            if 0 <= index < len(self.rows)
+        }
         self.rows[row_index]["group"] = group
-        self.table.blockSignals(True)
-        group_item = self.table.item(row_index, 5)
-        if group_item is not None:
-            group_item.setText(group)
-        label_item = self.table.item(row_index, 0)
-        if label_item is not None and not self._font_style_for_label(
-            str(self.rows[row_index].get("label", ""))
-        ):
-            label_item.setForeground(QColor(GROUP_C_GREEN if group == "C" else "#17191C"))
-        self.table.blockSignals(False)
-        self.table.viewport().update()
-        # 直接更新报告，不要重建表格
-        self._update_report()
+        # Rebuild the report/table from the updated row model.  The grouped
+        # report is a rich-text table, so updating only the combo-box cell can
+        # leave its previous column layout visible until another refresh.
+        self._populate_results(redraw_plot=False)
+        selected_ids.add(id(self.rows[row_index]))
+        self._select_rows(
+            index for index, row in enumerate(self.rows) if id(row) in selected_ids
+        )
         self.statusChanged.emit("done", f"第 {row_index + 1} 行已设置为 {group} 组")
 
     def _table_row_token(self, row_index: int) -> int | None:
@@ -6796,8 +6795,9 @@ class GalleryPage(QWidget):
 class KeysPage(QWidget):
     keysChanged = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, repository: Repository) -> None:
         super().__init__()
+        self.repository = repository
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 28)
         layout.addWidget(section_label("密钥管理"))
@@ -6829,6 +6829,14 @@ class KeysPage(QWidget):
         layout.addStretch()
 
     def open_env(self) -> None:
+        password, ok = QInputDialog.getText(
+            self, "密码验证", "请输入管理员密码：", QLineEdit.EchoMode.Password
+        )
+        if not ok:
+            return
+        if password != str(self.repository.get("unlock_password", "000")):
+            QMessageBox.warning(self, "验证失败", "密码错误，无法打开 .env 文件")
+            return
         env_path = APP_DIR / ".env"
         if not env_path.exists():
             env_path.touch()
@@ -7366,8 +7374,18 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.repository = repository
         self.setWindowTitle("设置")
-        self.resize(720, 700)
-        layout = QVBoxLayout(self)
+        self.resize(720, 780)
+        self.setMinimumSize(620, 420)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 18, 20, 18)
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
         layout.addWidget(section_label("应用设置"))
         form = QFormLayout()
         self.history_limit = QSpinBox()
@@ -7455,6 +7473,29 @@ class SettingsDialog(QDialog):
         maintenance.addWidget(export_history, 1, 1)
         layout.addLayout(maintenance)
         layout.addWidget(muted_label("备份会保存完整 ocr_data.json；清空缓存不会删除图片和识别历史。", True))
+        layout.addWidget(section_label("安全设置"))
+        password_form = QFormLayout()
+        self.old_password = QLineEdit()
+        self.old_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.old_password.setPlaceholderText("请输入当前管理员密码")
+        self.new_password = QLineEdit()
+        self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password.setPlaceholderText("请输入新密码")
+        self.confirm_password = QLineEdit()
+        self.confirm_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_password.setPlaceholderText("再次输入新密码")
+        password_form.addRow("旧密码", self.old_password)
+        password_form.addRow("新密码", self.new_password)
+        password_form.addRow("确认新密码", self.confirm_password)
+        layout.addLayout(password_form)
+        password_actions = QHBoxLayout()
+        change_password = QPushButton("修改密码")
+        change_password.clicked.connect(self.change_password)
+        password_actions.addWidget(change_password)
+        self.password_status = muted_label("")
+        password_actions.addWidget(self.password_status)
+        password_actions.addStretch()
+        layout.addLayout(password_actions)
         buttons = QHBoxLayout()
         save = QPushButton("保存")
         save.setObjectName("primary")
@@ -7515,6 +7556,29 @@ class SettingsDialog(QDialog):
             self.daily_limit_enabled[mode].setEnabled(True)
             self.daily_limit_count[mode].setEnabled(True)
         self.daily_limit_count["accurate"].setFocus()
+
+    def change_password(self) -> None:
+        old = self.old_password.text()
+        new = self.new_password.text()
+        confirm = self.confirm_password.text()
+        if old != str(self.repository.get("unlock_password", "000")):
+            self.password_status.setStyleSheet("color:#C24A3A;")
+            self.password_status.setText("旧密码错误")
+            return
+        if not new:
+            self.password_status.setStyleSheet("color:#C24A3A;")
+            self.password_status.setText("新密码不能为空")
+            return
+        if new != confirm:
+            self.password_status.setStyleSheet("color:#C24A3A;")
+            self.password_status.setText("两次新密码不一致")
+            return
+        self.repository.set("unlock_password", new)
+        self.old_password.clear()
+        self.new_password.clear()
+        self.confirm_password.clear()
+        self.password_status.setStyleSheet("color:#16A269;")
+        self.password_status.setText("密码已修改")
 
     def choose_dir(self, target: QLineEdit) -> None:
         directory = QFileDialog.getExistingDirectory(self, "选择目录", target.text() or str(APP_DIR))
@@ -7699,7 +7763,7 @@ class MainWindow(QMainWindow):
         self.ocr_page.top_notice_bar.hide()
         self.gallery_page = GalleryPage(self.repository)
         self.history_page = HistoryPage(self.repository)
-        self.keys_page = KeysPage()
+        self.keys_page = KeysPage(self.repository)
         self.stats_page = StatsPage(self.repository)
         self.rules_page = RulesPage(self.repository)
         pages = [
