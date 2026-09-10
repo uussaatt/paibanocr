@@ -3562,6 +3562,7 @@ class OCRPage(QWidget):
             label_item.setForeground(QColor(GROUP_C_GREEN if group == "C" else "#17191C"))
         self.table.blockSignals(False)
         self.table.viewport().update()
+        # 直接更新报告，不要重建表格
         self._update_report()
         self.statusChanged.emit("done", f"第 {row_index + 1} 行已设置为 {group} 组")
 
