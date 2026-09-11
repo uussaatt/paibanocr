@@ -49,6 +49,7 @@ _token_cache: dict[str, dict[str, Any]] = {}
 
 
 DATA_FILE = APP_DIR / "ocr_data.json"
+CLASSIFIER_HISTORY_LIMIT = 100
 
 MODE_NAMES = {
     "accurate": "高精度",
@@ -584,9 +585,6 @@ class Repository:
                                 page_no: int) -> None:
         """Save an editable classification-table snapshot separately from OCR history."""
         history = list(self.get("classifier_history", []) or [])
-        limit = int(self.get(
-            "classifier_history_limit", self.get("history_limit", 100)
-        ) or 100)
         timestamp = datetime.now()
         history.insert(0, {
             "id": timestamp.strftime("%Y%m%d%H%M%S%f"),
@@ -596,7 +594,7 @@ class Repository:
             "row_count": len(snapshot.get("rows", []) or []),
             "snapshot": copy.deepcopy(snapshot),
         })
-        self.set("classifier_history", history[:max(1, limit)])
+        self.set("classifier_history", history[:CLASSIFIER_HISTORY_LIMIT])
 
     def save_export_record(self, file_path: str, content: str) -> None:
         """Persist exports with the exact legacy history/backup schema."""

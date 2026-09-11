@@ -1949,6 +1949,8 @@ class ClassifierHistoryDialog(QDialog):
         refresh.clicked.connect(self.refresh)
         delete = QPushButton("删除")
         delete.clicked.connect(self.delete_selected)
+        clear = QPushButton("清空全部")
+        clear.clicked.connect(self.clear_all)
         restore = QPushButton("恢复到分类表")
         restore.setObjectName("primary")
         restore.clicked.connect(self.restore_selected)
@@ -1956,6 +1958,7 @@ class ClassifierHistoryDialog(QDialog):
         close.clicked.connect(self.reject)
         buttons.addWidget(refresh)
         buttons.addWidget(delete)
+        buttons.addWidget(clear)
         buttons.addStretch()
         buttons.addWidget(restore)
         buttons.addWidget(close)
@@ -2012,6 +2015,19 @@ class ClassifierHistoryDialog(QDialog):
         else:
             history = [entry for entry in history if entry is not item]
         self.repository.set("classifier_history", history)
+        self.refresh()
+
+    def clear_all(self) -> None:
+        history = list(self.repository.get("classifier_history", []) or [])
+        if not history:
+            QMessageBox.information(self, "提示", "分类表历史记录已经为空")
+            return
+        if QMessageBox.question(
+            self, "确认清空分类表历史",
+            f"确定清空全部 {len(history)} 条分类表历史记录吗？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.repository.set("classifier_history", [])
         self.refresh()
 
 
