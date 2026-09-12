@@ -99,6 +99,15 @@ QFrame#card {{ background: #FFFFFF; border: 1px solid #EEF0F2; border-radius: 8p
 QFrame#card[panelRole="parameters"] {{
     background: #FFFFFF; border: 1px solid #E7E9EC; border-radius: 12px;
 }}
+QFrame#collapsibleSection {{
+    background: #FFFFFF; border: 1px solid #E7E9EC; border-radius: 8px;
+}}
+QFrame#collapsibleHeader {{
+    background: #FFFFFF; border: 0; border-radius: 8px;
+}}
+QFrame#collapsibleHeader:hover {{ background: #FFF9E9; }}
+QLabel#collapsibleTitle {{ font-size: 12px; font-weight: 700; }}
+QLabel#collapsibleArrow {{ color: #6F747C; font-size: 12px; font-weight: 700; }}
 QLabel#appTitle {{ font-size: 15px; font-weight: 700; }}
 QLabel#sectionTitle {{ font-size: 12px; font-weight: 700; }}
 QLabel#muted {{ color: {MUTED}; font-size: 10px; }}
@@ -305,6 +314,71 @@ def muted_label(text: str, wrap: bool = False) -> QLabel:
     label.setObjectName("muted")
     label.setWordWrap(wrap)
     return label
+
+
+class CollapsibleSection(QFrame):
+    """A compact settings section whose full header toggles its contents."""
+
+    def __init__(self, title: str, expanded: bool = True, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("collapsibleSection")
+
+        section_layout = QVBoxLayout(self)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(0)
+
+        self.header = QFrame()
+        self.header.setObjectName("collapsibleHeader")
+        self.header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.header.setMinimumHeight(34)
+        self.header.mousePressEvent = self._toggle_from_event
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(14, 0, 14, 0)
+        header_layout.setSpacing(8)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("collapsibleTitle")
+        self.title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+
+        self.arrow_label = QLabel()
+        self.arrow_label.setObjectName("collapsibleArrow")
+        self.arrow_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.arrow_label.setFixedWidth(18)
+        self.arrow_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header_layout.addWidget(self.arrow_label)
+        section_layout.addWidget(self.header)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(14, 4, 14, 14)
+        self.body_layout.setSpacing(8)
+        section_layout.addWidget(self.body)
+        self.set_expanded(expanded)
+
+    def _toggle_from_event(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.set_expanded(not self.is_expanded())
+        event.accept()
+
+    def _update_state(self) -> None:
+        expanded = self.is_expanded()
+        self.body.setVisible(expanded)
+        self.arrow_label.setText("▼" if expanded else "▶")
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.body.setProperty("expanded", bool(expanded))
+        self._update_state()
+
+    def is_expanded(self) -> bool:
+        return bool(self.body.property("expanded"))
+
+    def add_widget(self, widget: QWidget) -> None:
+        self.body_layout.addWidget(widget)
+
+    def add_layout(self, child_layout) -> None:
+        self.body_layout.addLayout(child_layout)
 
 
 class StepButton(QPushButton):
@@ -7402,7 +7476,8 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 18)
         scroll.setWidget(content)
         outer_layout.addWidget(scroll)
-        layout.addWidget(section_label("应用设置"))
+        app_section = CollapsibleSection("应用设置", expanded=True)
+        layout.addWidget(app_section)
         form = QFormLayout()
         self.history_limit = QSpinBox()
         self.history_limit.setRange(10, 10000)
@@ -7442,8 +7517,9 @@ class SettingsDialog(QDialog):
         report_format_index = self.report_format.findData(current_report_format)
         self.report_format.setCurrentIndex(report_format_index if report_format_index >= 0 else 0)
         form.addRow("文本报告展示格式", self.report_format)
-        layout.addLayout(form)
-        layout.addWidget(section_label("每日识别限制"))
+        app_section.add_layout(form)
+        limit_section = CollapsibleSection("每日识别限制", expanded=True)
+        layout.addWidget(limit_section)
         limit_form = QFormLayout()
         self.daily_limit_enabled: dict[str, QCheckBox] = {}
         self.daily_limit_count: dict[str, QSpinBox] = {}
@@ -7470,10 +7546,11 @@ class SettingsDialog(QDialog):
         unlock_limit = QPushButton("解锁修改")
         unlock_limit.clicked.connect(self.unlock_daily_limit)
         limit_form.addRow("", unlock_limit)
-        layout.addLayout(limit_form)
-        layout.addWidget(muted_label("快速识别不受限制；修改高精度或通用的每日限额、开关前需输入管理员密码。当天次数会在次日自动归零。", True))
+        limit_section.add_layout(limit_form)
+        limit_section.add_widget(muted_label("快速识别不受限制；修改高精度或通用的每日限额、开关前需输入管理员密码。当天次数会在次日自动归零。", True))
         self.refresh_daily_limit_status()
-        layout.addWidget(section_label("数据维护"))
+        maintenance_section = CollapsibleSection("数据维护", expanded=False)
+        layout.addWidget(maintenance_section)
         maintenance = QGridLayout()
         data_info = QPushButton("数据文件信息")
         data_info.clicked.connect(self.show_data_info)
@@ -7487,9 +7564,10 @@ class SettingsDialog(QDialog):
         maintenance.addWidget(backup, 0, 1)
         maintenance.addWidget(clear_cache, 1, 0)
         maintenance.addWidget(export_history, 1, 1)
-        layout.addLayout(maintenance)
-        layout.addWidget(muted_label("备份会保存完整 ocr_data.json；清空缓存不会删除图片和识别历史。", True))
-        layout.addWidget(section_label("安全设置"))
+        maintenance_section.add_layout(maintenance)
+        maintenance_section.add_widget(muted_label("备份会保存完整 ocr_data.json；清空缓存不会删除图片和识别历史。", True))
+        security_section = CollapsibleSection("安全设置", expanded=False)
+        layout.addWidget(security_section)
         password_form = QFormLayout()
         self.old_password = QLineEdit()
         self.old_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -7503,7 +7581,7 @@ class SettingsDialog(QDialog):
         password_form.addRow("旧密码", self.old_password)
         password_form.addRow("新密码", self.new_password)
         password_form.addRow("确认新密码", self.confirm_password)
-        layout.addLayout(password_form)
+        security_section.add_layout(password_form)
         password_actions = QHBoxLayout()
         change_password = QPushButton("修改密码")
         change_password.clicked.connect(self.change_password)
@@ -7511,14 +7589,15 @@ class SettingsDialog(QDialog):
         self.password_status = muted_label("")
         password_actions.addWidget(self.password_status)
         password_actions.addStretch()
-        layout.addLayout(password_actions)
+        security_section.add_layout(password_actions)
         buttons = QHBoxLayout()
         save = QPushButton("保存")
         save.setObjectName("primary")
         save.clicked.connect(self.accept)
         buttons.addStretch()
         buttons.addWidget(save)
-        layout.addLayout(buttons)
+        buttons.setContentsMargins(20, 0, 20, 12)
+        outer_layout.addLayout(buttons)
 
     def accept(self) -> None:
         self.repository.set("history_limit", self.history_limit.value())
